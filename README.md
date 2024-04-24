@@ -12,11 +12,11 @@ It will target x86_64 linux systems.
 ### Milestones
 
 - [ ] Frontend
-    - [x] Lexer
-    - [x] Parser
-    - [x] Semantic Analysis
-    - [ ] IR Generation
+  - [x] Lexer
+  - [x] Parser
+  - [x] Semantic Analysis
+  - [ ] IR Generation
 
 - [ ] Backend
-    - [ ] IR Optimization
-    - [ ] Code Generation (x86_64)
+  - [ ] IR Optimization
+  - [ ] Code Generation (x86_64)
