@@ -118,16 +118,16 @@ impl<'a> Lexer<'a> {
     }
 
     fn make_token(&self, kind: TokenKind<'a>) -> Token<'a> {
-        let start: u32 = self.start.try_into().unwrap();
-        let cur: u32 = self.cur.try_into().unwrap();
-        let span = unsafe { Span::new_unchecked(start, cur) };
+        let start: u32 = self.start.try_into().expect("span fields must be u32");
+        let cur: u32 = self.cur.try_into().expect("span fields must be u32");
+        let span = Span::new(start, cur).unwrap();
         Token::new(kind, span)
     }
 
     fn make_err(&self, kind: LexErrorKind) -> LexError {
-        let start: u32 = self.start.try_into().unwrap();
-        let cur: u32 = self.cur.try_into().unwrap();
-        let span = unsafe { Span::new_unchecked(start, cur) };
+        let start: u32 = self.start.try_into().expect("span fields must be u32");
+        let cur: u32 = self.cur.try_into().expect("span fields must be u32");
+        let span = Span::new(start, cur).unwrap();
         LexError::new(kind, span)
     }
 
@@ -169,16 +169,14 @@ impl<'a> Lexer<'a> {
     fn integer(&mut self) -> Token<'a> {
         self.eat_while(|c| c.is_ascii_digit());
         let s = &self.input[self.start..self.cur];
-        // `s` is guaranteed to be a valid UTF-8 string because we only accept string
-        // in the constructor.
-        let s = unsafe { std::str::from_utf8_unchecked(s) };
+        let s = std::str::from_utf8(s).unwrap();
         self.make_token(TokenKind::Int(s))
     }
 
     fn identifier_or_keyword(&mut self) -> Token<'a> {
         self.eat_while(TokenKind::is_ident_char);
         let s = &self.input[self.start..self.cur];
-        let s = unsafe { std::str::from_utf8_unchecked(s) };
+        let s = std::str::from_utf8(s).unwrap();
         match TokenKind::keyword(s) {
             Some(kw) => self.make_token(kw),
             None => self.make_token(TokenKind::Id(s)),
@@ -236,7 +234,7 @@ impl<'a> Lexer<'a> {
                 b'\\' => {
                     self.bump();
                     let s = &self.input[self.start + 1..self.cur - 1];
-                    let s = unsafe { std::str::from_utf8_unchecked(s) };
+                    let s = std::str::from_utf8(s).unwrap();
                     let mut s = s.to_string();
 
                     match self.bump() {
@@ -261,7 +259,7 @@ impl<'a> Lexer<'a> {
         self.bump();
 
         let s = &self.input[self.start + 1..self.cur - 1];
-        let s = unsafe { std::str::from_utf8_unchecked(s) };
+        let s = std::str::from_utf8(s).unwrap();
 
         if s.len() > 1024 {
             return Err(self.make_err(LexErrorKind::StringTooLong));

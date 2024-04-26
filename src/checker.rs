@@ -59,10 +59,6 @@ impl<'a> Checker<'a> {
         self.object_envs.last_mut().unwrap().insert(id, ty)
     }
 
-    fn get_class(&self, ty: TypeId) -> Option<&ClassTypeData<'a>> {
-        self.class_env.get_class(ty)
-    }
-
     fn insert_class(
         &mut self,
         ty: Type<'a>,
@@ -339,10 +335,8 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        match self.get_class(ty) {
-            Some(_) => Ok(TypedExpr::new(TypedExprKind::New(ty), span, ty)),
-            None => Err(TypeError::new(TypeErrorKind::UndefinedClassId(ty), span)),
-        }
+
+        Ok(TypedExpr::new(TypedExprKind::New(ty), span, ty))
     }
 
     fn check_if_expr(

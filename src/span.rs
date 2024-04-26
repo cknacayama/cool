@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     pub start: u32,
     pub end:   u32,
@@ -11,14 +11,6 @@ impl Span {
         } else {
             None
         }
-    }
-
-    /// # Safety
-    ///
-    /// This function is unsafe because it does not check if `start <= end`.
-    /// It is up to the caller to ensure that the invariant is upheld.
-    pub unsafe fn new_unchecked(start: u32, end: u32) -> Self {
-        Self { start, end }
     }
 
     pub fn len(&self) -> u32 {
@@ -59,12 +51,6 @@ impl Span {
         }
 
         (start_location, Location::new(line, column))
-    }
-}
-
-impl Default for Span {
-    fn default() -> Self {
-        unsafe { Self::new_unchecked(0, 0) }
     }
 }
 

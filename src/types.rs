@@ -12,7 +12,6 @@ pub enum TypeErrorKind<'a> {
     ExpectedBool(TypeId),
     ExpectedInt(TypeId),
     UndefinedClass(&'a str),
-    UndefinedClassId(TypeId),
     CannotIndexSelfType,
     UndefinedMethod(TypeId, &'a str),
     UndefinedObject(&'a str),
@@ -23,9 +22,9 @@ pub enum TypeErrorKind<'a> {
     CannotInheritFromBool,
     CannotInheritFromInt,
     CannotInheritFromString,
+    CannotRedefineSelfType,
     NotSubtype(TypeId, TypeId),
     EmptyJoin,
-    NoneType,
 }
 
 impl<'a> std::fmt::Display for TypeErrorKind<'a> {
@@ -40,7 +39,6 @@ impl<'a> std::fmt::Display for TypeErrorKind<'a> {
             TypeErrorKind::ExpectedBool(ty) => write!(f, "expected Bool, found {}", ty),
             TypeErrorKind::ExpectedInt(ty) => write!(f, "expected Int, found {}", ty),
             TypeErrorKind::UndefinedClass(id) => write!(f, "undefined class: {}", id),
-            TypeErrorKind::UndefinedClassId(id) => write!(f, "undefined class id: {}", id),
             TypeErrorKind::CannotIndexSelfType => write!(f, "cannot index SELF_TYPE"),
             TypeErrorKind::UndefinedMethod(class, method) => {
                 write!(f, "undefined method: {}.{}", class, method)
@@ -53,6 +51,7 @@ impl<'a> std::fmt::Display for TypeErrorKind<'a> {
             TypeErrorKind::RedefinedAttribute(class, attr) => {
                 write!(f, "redefined attribute: {}.{}", class, attr)
             }
+            TypeErrorKind::CannotRedefineSelfType => write!(f, "cannot redefine SELF_TYPE"),
             TypeErrorKind::CannotInheritFromSelf => write!(f, "cannot inherit from SELF_TYPE"),
             TypeErrorKind::CannotInheritFromBool => write!(f, "cannot inherit from Bool"),
             TypeErrorKind::CannotInheritFromInt => write!(f, "cannot inherit from Int"),
@@ -61,7 +60,6 @@ impl<'a> std::fmt::Display for TypeErrorKind<'a> {
                 write!(f, "{} is not a subtype of {}", lhs, rhs)
             }
             TypeErrorKind::EmptyJoin => write!(f, "empty join"),
-            TypeErrorKind::NoneType => write!(f, "none type"),
         }
     }
 }
@@ -102,7 +100,7 @@ pub enum Type<'a> {
     Class(&'a str),
 }
 
-pub const IO_CLASS: Type<'static> = Type::Class("IO");
+const IO_CLASS: Type<'static> = Type::Class("IO");
 
 impl<'a> Type<'a> {
     pub fn to_str(&self) -> &'a str {
@@ -115,6 +113,7 @@ impl<'a> Type<'a> {
             Type::Class(id) => id,
         }
     }
+
     pub fn is_self_type(&self) -> bool {
         matches!(self, Type::SelfType)
     }
@@ -177,35 +176,43 @@ impl<'a> std::fmt::Display for Type<'a> {
     }
 }
 
+/// An unique identifier for types.
+///
+/// Because it is only possible to construct a `ClassId` when
+/// inserting a class into the `ClassEnv`, it is guaranteed that
+/// the `ClassId` is unique and valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TypeId {
     SelfType,
-    Class(NonZeroU32),
+    Class(ClassId),
 }
 
-pub const OBJECT_ID: TypeId = TypeId::Class(unsafe { NonZeroU32::new_unchecked(1) });
-pub const INT_ID: TypeId = TypeId::Class(unsafe { NonZeroU32::new_unchecked(2) });
-pub const BOOL_ID: TypeId = TypeId::Class(unsafe { NonZeroU32::new_unchecked(3) });
-pub const STRING_ID: TypeId = TypeId::Class(unsafe { NonZeroU32::new_unchecked(4) });
-pub const IO_ID: TypeId = TypeId::Class(unsafe { NonZeroU32::new_unchecked(5) });
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClassId(NonZeroU32);
+
+pub const OBJECT_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(1) }));
+pub const INT_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(2) }));
+pub const BOOL_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(3) }));
+pub const STRING_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
+pub const IO_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
 
 impl TypeId {
     pub fn id(self) -> Option<NonZeroU32> {
         match self {
-            TypeId::Class(id) => Some(id),
+            TypeId::Class(id) => Some(id.0),
             _ => None,
         }
     }
 
-    pub fn to_index(self) -> Option<usize> {
+    fn to_index(self) -> Option<usize> {
         match self {
-            TypeId::Class(id) => Some((id.get() - 1) as usize),
+            TypeId::Class(id) => Some((id.0.get() - 1) as usize),
             _ => None,
         }
     }
 
-    pub fn to_index_or_err(self) -> Result<usize, TypeErrorKind<'static>> {
-        self.to_index().ok_or(TypeErrorKind::UndefinedClassId(self))
+    fn to_index_or_err(self) -> Result<usize, TypeErrorKind<'static>> {
+        self.to_index().ok_or(TypeErrorKind::CannotIndexSelfType)
     }
 
     pub fn is_self_type(self) -> bool {
@@ -266,7 +273,7 @@ impl std::fmt::Display for TypeId {
             &BOOL_ID => write!(f, "Bool"),
             &STRING_ID => write!(f, "String"),
             &IO_ID => write!(f, "IO"),
-            TypeId::Class(id) => write!(f, "Class{}", id),
+            TypeId::Class(id) => write!(f, "Class{}", id.0),
         }
     }
 }
@@ -309,24 +316,6 @@ impl<'a> ClassTypeData<'a> {
                 methods,
                 children,
             }),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// This function is unsafe because it allows creating a ClassTypeData with an invalid parent.
-    /// The parent must be a valid inheritable type.
-    pub unsafe fn new_unchecked(
-        parent: Option<TypeId>,
-        attributes: HashMap<&'a str, TypeId>,
-        methods: HashMap<&'a str, MethodTypeData>,
-        children: HashSet<TypeId>,
-    ) -> Self {
-        Self {
-            parent,
-            attributes,
-            methods,
-            children,
         }
     }
 }
@@ -382,71 +371,66 @@ impl<'a> ClassEnv<'a> {
     pub fn with_builtin() -> Self {
         let mut classes = vec![];
 
-        let object = unsafe {
-            ClassTypeData::new_unchecked(
-                None,
-                HashMap::new(),
-                HashMap::from([
-                    ("abort", MethodTypeData::new(Box::new([]), OBJECT_ID)),
-                    ("type_name", MethodTypeData::new(Box::new([]), STRING_ID)),
-                    ("copy", MethodTypeData::new(Box::new([]), TypeId::SelfType)),
-                ]),
-                HashSet::from([INT_ID, BOOL_ID, STRING_ID]),
-            )
-        };
-        let bool_ = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-            )
-        };
-        let int = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-            )
-        };
-        let string = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::from([
-                    ("length", MethodTypeData::new(Box::new([]), INT_ID)),
-                    (
-                        "concat",
-                        MethodTypeData::new(Box::from([STRING_ID]), STRING_ID),
-                    ),
-                    (
-                        "substr",
-                        MethodTypeData::new(Box::from([INT_ID, INT_ID]), STRING_ID),
-                    ),
-                ]),
-                HashSet::new(),
-            )
-        };
-        let io = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::from([
-                    (
-                        "out_string",
-                        MethodTypeData::new(Box::from([STRING_ID]), TypeId::SelfType),
-                    ),
-                    (
-                        "out_int",
-                        MethodTypeData::new(Box::from([INT_ID]), TypeId::SelfType),
-                    ),
-                    ("in_string", MethodTypeData::new(Box::from([]), STRING_ID)),
-                    ("in_int", MethodTypeData::new(Box::from([]), INT_ID)),
-                ]),
-                HashSet::new(),
-            )
-        };
+        let object = ClassTypeData::new(
+            None,
+            HashMap::new(),
+            HashMap::from([
+                ("abort", MethodTypeData::new(Box::new([]), OBJECT_ID)),
+                ("type_name", MethodTypeData::new(Box::new([]), STRING_ID)),
+                ("copy", MethodTypeData::new(Box::new([]), TypeId::SelfType)),
+            ]),
+            HashSet::from([INT_ID, BOOL_ID, STRING_ID]),
+        )
+        .unwrap();
+        let bool_ = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+        )
+        .unwrap();
+        let int = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+        )
+        .unwrap();
+        let string = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::from([
+                ("length", MethodTypeData::new(Box::new([]), INT_ID)),
+                (
+                    "concat",
+                    MethodTypeData::new(Box::from([STRING_ID]), STRING_ID),
+                ),
+                (
+                    "substr",
+                    MethodTypeData::new(Box::from([INT_ID, INT_ID]), STRING_ID),
+                ),
+            ]),
+            HashSet::new(),
+        )
+        .unwrap();
+        let io = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::from([
+                (
+                    "out_string",
+                    MethodTypeData::new(Box::from([STRING_ID]), TypeId::SelfType),
+                ),
+                (
+                    "out_int",
+                    MethodTypeData::new(Box::from([INT_ID]), TypeId::SelfType),
+                ),
+                ("in_string", MethodTypeData::new(Box::from([]), STRING_ID)),
+                ("in_int", MethodTypeData::new(Box::from([]), INT_ID)),
+            ]),
+            HashSet::new(),
+        )
+        .unwrap();
 
         classes.push(object);
         classes.push(int);
@@ -466,19 +450,11 @@ impl<'a> ClassEnv<'a> {
         Self { types, classes }
     }
 
-    pub fn get_parent(&self, ty: TypeId) -> Result<Option<TypeId>, TypeErrorKind<'a>> {
+    fn get_parent(&self, ty: TypeId) -> Result<Option<TypeId>, TypeErrorKind<'static>> {
         match ty.to_index() {
-            None => Ok(None),
-            Some(index) => self
-                .classes
-                .get(index)
-                .map(|class| class.parent)
-                .ok_or(TypeErrorKind::UndefinedClassId(ty)),
+            None => Err(TypeErrorKind::CannotIndexSelfType),
+            Some(index) => Ok(self.classes.get(index).unwrap().parent),
         }
-    }
-
-    pub fn get_class(&self, ty: TypeId) -> Option<&ClassTypeData<'a>> {
-        self.classes.get(ty.to_index()?)
     }
 
     pub fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
@@ -486,8 +462,10 @@ impl<'a> ClassEnv<'a> {
     }
 
     fn insert_type(&mut self, ty: Type<'a>) -> Result<TypeId, TypeErrorKind<'a>> {
-        let id: u32 = (self.classes.len() + 1).try_into().unwrap();
-        let id = TypeId::Class(unsafe { NonZeroU32::new_unchecked(id) });
+        let id: u32 = (self.classes.len() + 1)
+            .try_into()
+            .expect("too many classes");
+        let id = TypeId::Class(ClassId(NonZeroU32::new(id).unwrap()));
 
         match self.types.insert(ty, id) {
             Some(class_id) => Err(TypeErrorKind::RedefinedClass(class_id)),
@@ -500,13 +478,18 @@ impl<'a> ClassEnv<'a> {
         ty: Type<'a>,
         data: ClassTypeData<'a>,
     ) -> Result<TypeId, TypeErrorKind<'a>> {
+        if let Type::SelfType = ty {
+            return Err(TypeErrorKind::CannotRedefineSelfType);
+        }
+
         let id = self.insert_type(ty)?;
 
         if let Some(parent) = data.parent {
-            match self.classes.get_mut(parent.to_index().unwrap()) {
-                Some(parent) => parent.children.insert(id),
-                None => return Err(TypeErrorKind::UndefinedClassId(parent)),
-            };
+            self.classes
+                .get_mut(parent.to_index().unwrap())
+                .unwrap()
+                .children
+                .insert(id);
         }
 
         self.classes.push(data);
@@ -519,20 +502,19 @@ impl<'a> ClassEnv<'a> {
         ty: TypeId,
         method: &'a str,
     ) -> Result<&MethodTypeData, TypeErrorKind<'a>> {
-        self.classes
-            .get(ty.to_index_or_err()?)
-            .ok_or(TypeErrorKind::UndefinedClassId(ty))
-            .and_then(|class| {
-                class
-                    .methods
-                    .get(method)
-                    .or_else(|| {
-                        class
-                            .parent
-                            .and_then(|parent| self.get_method(parent, method).ok())
-                    })
-                    .ok_or(TypeErrorKind::UndefinedMethod(ty, method))
-            })
+        let mut data = &self.classes[ty.to_index_or_err()?];
+
+        loop {
+            if let Some(data) = data.methods.get(method) {
+                return Ok(data);
+            }
+            match data.parent {
+                Some(parent) => data = &self.classes[parent.to_index().unwrap()],
+                None => break,
+            };
+        }
+
+        Err(TypeErrorKind::UndefinedMethod(ty, method))
     }
 
     pub fn insert_method(
@@ -541,40 +523,44 @@ impl<'a> ClassEnv<'a> {
         method: &'a str,
         data: MethodTypeData,
     ) -> Result<(), TypeErrorKind<'a>> {
-        self.get_parent(ty)?
-            .map(|parent| match self.get_method(parent, method) {
-                Ok(parent_method) if parent_method == &data => Ok(()),
-                Err(TypeErrorKind::UndefinedMethod(_, _)) => Ok(()),
-                Ok(_) => Err(TypeErrorKind::RedefinedMethod(ty, method)),
-                Err(err) => Err(err),
-            })
-            .transpose()?;
+        if let Some(parent) = self.get_parent(ty)? {
+            match self.get_method(parent, method) {
+                Ok(parent_method) if parent_method != &data => {
+                    return Err(TypeErrorKind::RedefinedMethod(ty, method))
+                }
+                Err(err) if !matches!(err, TypeErrorKind::UndefinedMethod(_, _)) => {
+                    return Err(err)
+                }
+                _ => (),
+            }
+        }
 
-        self.classes
+        match self
+            .classes
             .get_mut(ty.to_index_or_err()?)
-            .ok_or(TypeErrorKind::UndefinedClassId(ty))
-            .and_then(|class| match class.methods.insert(method, data) {
-                Some(_) => Err(TypeErrorKind::RedefinedMethod(ty, method)),
-                None => Ok(()),
-            })
+            .unwrap()
+            .methods
+            .insert(method, data)
+        {
+            Some(_) => Err(TypeErrorKind::RedefinedMethod(ty, method)),
+            None => Ok(()),
+        }
     }
 
     pub fn get_attribute(&self, ty: TypeId, attr: &'a str) -> Result<TypeId, TypeErrorKind<'a>> {
-        self.classes
-            .get(ty.to_index_or_err()?)
-            .ok_or(TypeErrorKind::UndefinedClassId(ty))
-            .and_then(|class| {
-                class
-                    .attributes
-                    .get(attr)
-                    .copied()
-                    .or_else(|| {
-                        class
-                            .parent
-                            .and_then(|parent| self.get_attribute(parent, attr).ok())
-                    })
-                    .ok_or(TypeErrorKind::UndefinedObject(attr))
-            })
+        let mut data = &self.classes[ty.to_index_or_err()?];
+
+        loop {
+            if let Some(data) = data.attributes.get(attr) {
+                return Ok(*data);
+            }
+            match data.parent {
+                Some(parent) => data = &self.classes[parent.to_index().unwrap()],
+                None => break,
+            };
+        }
+
+        Err(TypeErrorKind::UndefinedObject(attr))
     }
 
     pub fn insert_attribute(
@@ -583,13 +569,16 @@ impl<'a> ClassEnv<'a> {
         attr: &'a str,
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
-        self.classes
+        match self
+            .classes
             .get_mut(ty.to_index_or_err()?)
-            .ok_or(TypeErrorKind::UndefinedClassId(ty))
-            .and_then(|class| match class.attributes.insert(attr, data) {
-                Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
-                None => Ok(()),
-            })
+            .unwrap()
+            .attributes
+            .insert(attr, data)
+        {
+            Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
+            None => Ok(()),
+        }
     }
 
     pub fn is_subtype(
@@ -606,21 +595,21 @@ impl<'a> ClassEnv<'a> {
             TypeId::SelfType => current_class,
             _ => rhs,
         };
+
         if cur_lhs == rhs {
             return Ok(());
         }
 
-        while let Some(class) = match self.classes.get(cur_lhs.to_index_or_err()?) {
-            None => return Err(TypeErrorKind::UndefinedClassId(cur_lhs)),
-            class => class,
-        } {
+        loop {
+            let class = &self.classes[cur_lhs.to_index().unwrap()];
             if class.parent == Some(rhs) {
                 return Ok(());
             }
             match class.parent {
+                Some(parent) if parent == rhs => return Ok(()),
                 Some(parent) => cur_lhs = parent,
                 None => break,
-            }
+            };
         }
 
         Err(TypeErrorKind::NotSubtype(lhs, rhs))
@@ -648,10 +637,8 @@ impl<'a> ClassEnv<'a> {
 
         let mut rhs_ancestors = HashSet::new();
 
-        while let Some(class) = match self.classes.get(rhs.to_index_or_err()?) {
-            None => return Err(TypeErrorKind::UndefinedClassId(rhs)),
-            class => class,
-        } {
+        loop {
+            let class = &self.classes[rhs.to_index().unwrap()];
             rhs_ancestors.insert(rhs);
             match class.parent {
                 Some(parent) => rhs = parent,
@@ -659,10 +646,8 @@ impl<'a> ClassEnv<'a> {
             }
         }
 
-        while let Some(class) = match self.classes.get(lhs.to_index_or_err()?) {
-            None => return Err(TypeErrorKind::UndefinedClassId(lhs)),
-            class => class,
-        } {
+        loop {
+            let class = &self.classes[lhs.to_index().unwrap()];
             if rhs_ancestors.contains(&lhs) {
                 return Ok(lhs);
             }
@@ -704,36 +689,31 @@ mod tests {
         let d = Type::Class("D");
         let e = Type::Class("E");
 
-        let a_data = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-            )
-        };
-        let b_data = unsafe {
-            ClassTypeData::new_unchecked(
-                Some(OBJECT_ID),
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-            )
-        };
+        let a_data = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+        )
+        .unwrap();
+        let b_data = ClassTypeData::new(
+            Some(OBJECT_ID),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+        )
+        .unwrap();
         let a = env.insert_class(a, a_data).unwrap();
         let b = env.insert_class(b, b_data).unwrap();
 
-        let c_data = unsafe {
-            ClassTypeData::new_unchecked(Some(a), HashMap::new(), HashMap::new(), HashSet::new())
-        };
+        let c_data =
+            ClassTypeData::new(Some(a), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
         let c = env.insert_class(c, c_data).unwrap();
 
-        let d_data = unsafe {
-            ClassTypeData::new_unchecked(Some(b), HashMap::new(), HashMap::new(), HashSet::new())
-        };
-        let e_data = unsafe {
-            ClassTypeData::new_unchecked(Some(c), HashMap::new(), HashMap::new(), HashSet::new())
-        };
+        let d_data =
+            ClassTypeData::new(Some(b), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
+        let e_data =
+            ClassTypeData::new(Some(c), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
         let d = env.insert_class(d, d_data).unwrap();
         let e = env.insert_class(e, e_data).unwrap();
 
