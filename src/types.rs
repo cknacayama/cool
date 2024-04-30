@@ -187,16 +187,16 @@ pub enum TypeId {
     Class(ClassId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassId(NonZeroU32);
 
-pub const OBJECT_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(1) }));
-pub const INT_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(2) }));
-pub const BOOL_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(3) }));
-pub const STRING_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
-pub const IO_ID: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
-
 impl TypeId {
+    pub const OBJECT: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(1) }));
+    pub const INT: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(2) }));
+    pub const BOOL: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(3) }));
+    pub const STRING: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
+    pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
+
     pub fn id(self) -> Option<NonZeroU32> {
         match self {
             TypeId::Class(id) => Some(id.0),
@@ -220,35 +220,35 @@ impl TypeId {
     }
 
     pub fn is_object(self) -> bool {
-        self == OBJECT_ID
+        self == TypeId::OBJECT
     }
 
     pub fn is_int(self) -> bool {
-        self == INT_ID
+        self == TypeId::INT
     }
 
     pub fn is_bool(self) -> bool {
-        self == BOOL_ID
+        self == TypeId::BOOL
     }
 
     pub fn is_string(self) -> bool {
-        self == STRING_ID
+        self == TypeId::STRING
     }
 
     pub fn is_io(self) -> bool {
-        self == IO_ID
+        self == TypeId::IO
     }
 
     pub fn is_inheritable(self) -> bool {
-        self == OBJECT_ID || self >= IO_ID
+        self == TypeId::OBJECT || self >= TypeId::IO
     }
 
     pub fn check_inheritance(self) -> Result<(), TypeErrorKind<'static>> {
         match self {
             Self::SelfType => Err(TypeErrorKind::CannotInheritFromSelf),
-            BOOL_ID => Err(TypeErrorKind::CannotInheritFromBool),
-            INT_ID => Err(TypeErrorKind::CannotInheritFromInt),
-            STRING_ID => Err(TypeErrorKind::CannotInheritFromString),
+            TypeId::BOOL => Err(TypeErrorKind::CannotInheritFromBool),
+            TypeId::INT => Err(TypeErrorKind::CannotInheritFromInt),
+            TypeId::STRING => Err(TypeErrorKind::CannotInheritFromString),
             _ => Ok(()),
         }
     }
@@ -268,13 +268,25 @@ impl std::fmt::Display for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::SelfType => write!(f, "SELF_TYPE"),
-            &OBJECT_ID => write!(f, "Object"),
-            &INT_ID => write!(f, "Int"),
-            &BOOL_ID => write!(f, "Bool"),
-            &STRING_ID => write!(f, "String"),
-            &IO_ID => write!(f, "IO"),
+            &TypeId::OBJECT => write!(f, "Object"),
+            &TypeId::INT => write!(f, "Int"),
+            &TypeId::BOOL => write!(f, "Bool"),
+            &TypeId::STRING => write!(f, "String"),
+            &TypeId::IO => write!(f, "IO"),
             TypeId::Class(id) => write!(f, "Class{}", id.0),
         }
+    }
+}
+
+impl std::fmt::Debug for ClassId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for ClassId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0.get())
     }
 }
 
@@ -307,9 +319,9 @@ impl<'a> ClassTypeData<'a> {
     ) -> Result<Self, TypeErrorKind<'static>> {
         match parent {
             Some(TypeId::SelfType) => Err(TypeErrorKind::CannotInheritFromSelf),
-            Some(BOOL_ID) => Err(TypeErrorKind::CannotInheritFromBool),
-            Some(INT_ID) => Err(TypeErrorKind::CannotInheritFromInt),
-            Some(STRING_ID) => Err(TypeErrorKind::CannotInheritFromString),
+            Some(TypeId::BOOL) => Err(TypeErrorKind::CannotInheritFromBool),
+            Some(TypeId::INT) => Err(TypeErrorKind::CannotInheritFromInt),
+            Some(TypeId::STRING) => Err(TypeErrorKind::CannotInheritFromString),
             _ => Ok(Self {
                 parent,
                 attributes,
@@ -375,58 +387,64 @@ impl<'a> ClassEnv<'a> {
             None,
             HashMap::new(),
             HashMap::from([
-                ("abort", MethodTypeData::new(Box::new([]), OBJECT_ID)),
-                ("type_name", MethodTypeData::new(Box::new([]), STRING_ID)),
+                ("abort", MethodTypeData::new(Box::new([]), TypeId::OBJECT)),
+                (
+                    "type_name",
+                    MethodTypeData::new(Box::new([]), TypeId::STRING),
+                ),
                 ("copy", MethodTypeData::new(Box::new([]), TypeId::SelfType)),
             ]),
-            HashSet::from([INT_ID, BOOL_ID, STRING_ID]),
+            HashSet::from([TypeId::INT, TypeId::BOOL, TypeId::STRING]),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
         )
         .unwrap();
         let int = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
         )
         .unwrap();
         let string = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::from([
-                ("length", MethodTypeData::new(Box::new([]), INT_ID)),
+                ("length", MethodTypeData::new(Box::new([]), TypeId::INT)),
                 (
                     "concat",
-                    MethodTypeData::new(Box::from([STRING_ID]), STRING_ID),
+                    MethodTypeData::new(Box::from([TypeId::STRING]), TypeId::STRING),
                 ),
                 (
                     "substr",
-                    MethodTypeData::new(Box::from([INT_ID, INT_ID]), STRING_ID),
+                    MethodTypeData::new(Box::from([TypeId::INT, TypeId::INT]), TypeId::STRING),
                 ),
             ]),
             HashSet::new(),
         )
         .unwrap();
         let io = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::from([
                 (
                     "out_string",
-                    MethodTypeData::new(Box::from([STRING_ID]), TypeId::SelfType),
+                    MethodTypeData::new(Box::from([TypeId::STRING]), TypeId::SelfType),
                 ),
                 (
                     "out_int",
-                    MethodTypeData::new(Box::from([INT_ID]), TypeId::SelfType),
+                    MethodTypeData::new(Box::from([TypeId::INT]), TypeId::SelfType),
                 ),
-                ("in_string", MethodTypeData::new(Box::from([]), STRING_ID)),
-                ("in_int", MethodTypeData::new(Box::from([]), INT_ID)),
+                (
+                    "in_string",
+                    MethodTypeData::new(Box::from([]), TypeId::STRING),
+                ),
+                ("in_int", MethodTypeData::new(Box::from([]), TypeId::INT)),
             ]),
             HashSet::new(),
         )
@@ -439,12 +457,12 @@ impl<'a> ClassEnv<'a> {
         classes.push(io);
 
         let types = HashMap::from([
-            (Type::Object, OBJECT_ID),
-            (Type::Int, INT_ID),
-            (Type::Bool, BOOL_ID),
-            (Type::String, STRING_ID),
+            (Type::Object, TypeId::OBJECT),
+            (Type::Int, TypeId::INT),
+            (Type::Bool, TypeId::BOOL),
+            (Type::String, TypeId::STRING),
             (Type::SelfType, TypeId::SelfType),
-            (IO_CLASS, IO_ID),
+            (IO_CLASS, TypeId::IO),
         ]);
 
         Self { types, classes }
@@ -657,7 +675,7 @@ impl<'a> ClassEnv<'a> {
             }
         }
 
-        Ok(OBJECT_ID)
+        Ok(TypeId::OBJECT)
     }
 
     pub fn join_fold<I>(&self, types: I, current_class: TypeId) -> Result<TypeId, TypeErrorKind<'a>>
@@ -690,14 +708,14 @@ mod tests {
         let e = Type::Class("E");
 
         let a_data = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
         )
         .unwrap();
         let b_data = ClassTypeData::new(
-            Some(OBJECT_ID),
+            Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
@@ -717,21 +735,21 @@ mod tests {
         let d = env.insert_class(d, d_data).unwrap();
         let e = env.insert_class(e, e_data).unwrap();
 
-        assert_eq!(env.join(a, b, a), Ok(OBJECT_ID));
+        assert_eq!(env.join(a, b, a), Ok(TypeId::OBJECT));
         assert_eq!(env.join(a, c, a), Ok(a));
-        assert_eq!(env.join(a, d, a), Ok(OBJECT_ID));
+        assert_eq!(env.join(a, d, a), Ok(TypeId::OBJECT));
         assert_eq!(env.join(a, e, a), Ok(a));
-        assert_eq!(env.join(b, c, a), Ok(OBJECT_ID));
+        assert_eq!(env.join(b, c, a), Ok(TypeId::OBJECT));
         assert_eq!(env.join(b, d, a), Ok(b));
-        assert_eq!(env.join(b, e, a), Ok(OBJECT_ID));
-        assert_eq!(env.join(c, d, a), Ok(OBJECT_ID));
+        assert_eq!(env.join(b, e, a), Ok(TypeId::OBJECT));
+        assert_eq!(env.join(c, d, a), Ok(TypeId::OBJECT));
         assert_eq!(env.join(c, e, a), Ok(c));
-        assert_eq!(env.join(d, e, a), Ok(OBJECT_ID));
+        assert_eq!(env.join(d, e, a), Ok(TypeId::OBJECT));
 
         assert_eq!(env.join(a, TypeId::SelfType, a), Ok(a));
 
         assert_eq!(env.join_fold([a, c, e], a), Ok(a));
-        assert_eq!(env.join_fold([c, d, e], a), Ok(OBJECT_ID));
-        assert_eq!(env.join_fold([a, b, c, d, e], a), Ok(OBJECT_ID));
+        assert_eq!(env.join_fold([c, d, e], a), Ok(TypeId::OBJECT));
+        assert_eq!(env.join_fold([a, b, c, d, e], a), Ok(TypeId::OBJECT));
     }
 }

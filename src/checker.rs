@@ -238,14 +238,20 @@ impl<'a> Checker<'a> {
         let span = expr.span;
         let kind = expr.kind;
         match kind {
-            ExprKind::IntLit(int) => Ok(TypedExpr::new(TypedExprKind::IntLit(int), span, INT_ID)),
-            ExprKind::BoolLit(bool) => {
-                Ok(TypedExpr::new(TypedExprKind::BoolLit(bool), span, BOOL_ID))
-            }
+            ExprKind::IntLit(int) => Ok(TypedExpr::new(
+                TypedExprKind::IntLit(int),
+                span,
+                TypeId::INT,
+            )),
+            ExprKind::BoolLit(bool) => Ok(TypedExpr::new(
+                TypedExprKind::BoolLit(bool),
+                span,
+                TypeId::BOOL,
+            )),
             ExprKind::StringLit(string) => Ok(TypedExpr::new(
                 TypedExprKind::StringLit(string),
                 span,
-                STRING_ID,
+                TypeId::STRING,
             )),
             ExprKind::Id(id) => {
                 let ty = self
@@ -441,7 +447,7 @@ impl<'a> Checker<'a> {
         Ok(TypedExpr::new(
             TypedExprKind::While(Box::new(cond), Box::new(loop_)),
             span,
-            OBJECT_ID,
+            TypeId::OBJECT,
         ))
     }
 

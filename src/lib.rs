@@ -1,5 +1,3 @@
-#![deny(unsafe_op_in_unsafe_fn, clippy::absurd_extreme_comparisons)]
-
 pub mod ast;
 pub mod checker;
 pub mod lexer;

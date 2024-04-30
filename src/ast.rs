@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::{
     span::Span,
     token::TokenKind,
-    types::{Type, TypeErrorKind, TypeId, BOOL_ID, INT_ID, STRING_ID},
+    types::{Type, TypeErrorKind, TypeId},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,26 +21,26 @@ impl BinOp {
     pub fn type_of(self, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeErrorKind<'static>> {
         match self {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => match (lhs, rhs) {
-                (INT_ID, INT_ID) => Ok(INT_ID),
-                (INT_ID, rhs_ty) => Err(TypeErrorKind::ExpectedInt(rhs_ty)),
+                (TypeId::INT, TypeId::INT) => Ok(TypeId::INT),
+                (TypeId::INT, rhs_ty) => Err(TypeErrorKind::ExpectedInt(rhs_ty)),
                 (lhs_ty, _) => Err(TypeErrorKind::ExpectedInt(lhs_ty)),
             },
 
             BinOp::Lt | BinOp::Le => match (lhs, rhs) {
-                (INT_ID, INT_ID) => Ok(BOOL_ID),
-                (INT_ID, rhs_ty) => Err(TypeErrorKind::ExpectedInt(rhs_ty)),
+                (TypeId::INT, TypeId::INT) => Ok(TypeId::BOOL),
+                (TypeId::INT, rhs_ty) => Err(TypeErrorKind::ExpectedInt(rhs_ty)),
                 (lhs_ty, _) => Err(TypeErrorKind::ExpectedInt(lhs_ty)),
             },
 
             BinOp::Eq => match (lhs, rhs) {
-                (INT_ID, _)
-                | (STRING_ID, _)
-                | (BOOL_ID, _)
-                | (_, INT_ID)
-                | (_, STRING_ID)
-                | (_, BOOL_ID) => {
+                (TypeId::INT, _)
+                | (TypeId::STRING, _)
+                | (TypeId::BOOL, _)
+                | (_, TypeId::INT)
+                | (_, TypeId::STRING)
+                | (_, TypeId::BOOL) => {
                     if lhs == rhs {
-                        Ok(BOOL_ID)
+                        Ok(TypeId::BOOL)
                     } else {
                         Err(TypeErrorKind::ExpectedType {
                             expected: lhs,
@@ -48,7 +48,7 @@ impl BinOp {
                         })
                     }
                 }
-                _ => Ok(BOOL_ID),
+                _ => Ok(TypeId::BOOL),
             },
         }
     }
@@ -65,16 +65,16 @@ impl UnOp {
     pub fn type_of(self, ty: TypeId) -> Result<TypeId, TypeErrorKind<'static>> {
         match self {
             UnOp::Complement => match ty {
-                INT_ID => Ok(INT_ID),
+                TypeId::INT => Ok(TypeId::INT),
                 ty => Err(TypeErrorKind::ExpectedInt(ty)),
             },
 
             UnOp::Not => match ty {
-                BOOL_ID => Ok(BOOL_ID),
+                TypeId::BOOL => Ok(TypeId::BOOL),
                 ty => Err(TypeErrorKind::ExpectedBool(ty)),
             },
 
-            UnOp::IsVoid => Ok(BOOL_ID),
+            UnOp::IsVoid => Ok(TypeId::BOOL),
         }
     }
 }

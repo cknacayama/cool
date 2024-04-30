@@ -1,23 +1,21 @@
-use cool::checker::SemanticChecker;
+use cool::{checker::SemanticChecker, lexer::Lexer, parser::Parser};
 
 fn main() {
     let input = std::fs::read_to_string("in/test.cl").unwrap();
+    let lexer = Lexer::new(&input);
 
-    let checker: SemanticChecker = SemanticChecker::from_input(&input);
-
-    match checker.check() {
-        Ok((classes, env)) => {
-            for class in classes {
-                println!("{:#?}", class);
+    match SemanticChecker::new(Parser::new(lexer)).check() {
+        Ok((asts, env)) => {
+            for ast in asts {
+                println!("{:#?}", ast);
             }
             println!("{:#?}", env);
         }
-        Err(err) => {
-            let (start, end) = err.span.location(&input);
-
+        Err(e) => {
+            let (start, end) = e.span.location(&input);
             eprintln!(
-                "error: {} at {}:{}-{}:{}",
-                err.kind, start.line, start.column, end.line, end.column
+                "Error: {} at {}:{}..{}:{}",
+                e.kind, start.line, start.column, end.line, end.column
             );
         }
     }
