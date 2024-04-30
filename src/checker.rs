@@ -235,8 +235,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_expr(&mut self, expr: Expr<'a>) -> TypeResult<'a, TypedExpr<'a>> {
-        let span = expr.span;
-        let kind = expr.kind;
+        let Expr { kind, span } = expr;
         match kind {
             ExprKind::IntLit(int) => Ok(TypedExpr::new(
                 TypedExprKind::IntLit(int),

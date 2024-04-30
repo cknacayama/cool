@@ -168,7 +168,7 @@ impl<'a> Parser<'a> {
             TokenKind::Id("Int") => Type::Int,
             TokenKind::Id("String") => Type::String,
             TokenKind::Id("Object") => Type::Object,
-            TokenKind::Id(id) => Type::Class(id),
+            TokenKind::Id(id) if id.chars().next().unwrap().is_uppercase() => Type::Class(id),
             _ => return Err(ParseError::new(ParseErrorKind::ExpectedType, token.span)),
         };
         Ok((ty, token.span))
@@ -232,7 +232,10 @@ impl<'a> Parser<'a> {
 
     pub fn parse_class(&mut self) -> ParseResult<Class<'a>> {
         let span = self.expect(TokenKind::KwClass)?;
-        let (id, _) = self.parse_id()?;
+        let (id, id_span) = self.parse_id()?;
+        if id.chars().next().unwrap().is_lowercase() {
+            return Err(ParseError::new(ParseErrorKind::ExpectedType, id_span));
+        }
         let parent = if self.next_if(TokenKind::KwInherits).is_some() {
             self.parse_type()?.0
         } else {
