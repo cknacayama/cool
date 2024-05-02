@@ -10,9 +10,10 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Checker<'a> {
-    object_envs: Vec<ObjectEnv<'a>>,
-    cur_class:   TypeId,
-    class_env:   ClassEnv<'a>,
+    object_envs:    Vec<ObjectEnv<'a>>,
+    cur_class:      TypeId,
+    cur_stack_size: usize,
+    class_env:      ClassEnv<'a>,
 }
 
 impl<'a> Default for Checker<'a> {
@@ -24,9 +25,10 @@ impl<'a> Default for Checker<'a> {
 impl<'a> Checker<'a> {
     pub fn new() -> Self {
         Self {
-            object_envs: vec![],
-            class_env:   ClassEnv::with_builtin(),
-            cur_class:   TypeId::SelfType,
+            object_envs:    vec![],
+            cur_stack_size: 0,
+            class_env:      ClassEnv::with_builtin(),
+            cur_class:      TypeId::SelfType,
         }
     }
 
@@ -79,7 +81,7 @@ impl<'a> Checker<'a> {
         &mut self,
         ty: TypeId,
         method: &'a str,
-        data: MethodTypeData,
+        data: MethodTypeData<'a>,
     ) -> Result<(), TypeErrorKind<'a>> {
         self.class_env.insert_method(ty, method, data)
     }
@@ -113,8 +115,14 @@ impl<'a> Checker<'a> {
             .get_type_or_err(&parent)
             .map_err(|kind| TypeError::new(kind, span))?;
 
-        let data = ClassTypeData::new(Some(parent), HashMap::new(), HashMap::new(), HashSet::new())
-            .map_err(|kind| TypeError::new(kind, span))?;
+        let data = ClassTypeData::new(
+            id,
+            Some(parent),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+        )
+        .map_err(|kind| TypeError::new(kind, span))?;
 
         let ty = Type::Class(id);
         let ty = self
@@ -135,7 +143,7 @@ impl<'a> Checker<'a> {
 
         self.cur_class = TypeId::SelfType;
 
-        Ok(TypedClass::new(id, parent, checked_features, span))
+        Ok(TypedClass::new(id, ty, parent, checked_features, span))
     }
 
     fn check_feature(&mut self, feature: Feature<'a>) -> TypeResult<'a, TypedFeature<'a>> {
@@ -148,6 +156,7 @@ impl<'a> Checker<'a> {
                 body,
             } => {
                 let method_ty = MethodTypeData {
+                    name:      id,
                     params:    params
                         .iter()
                         .map(|formal| {
@@ -203,6 +212,8 @@ impl<'a> Checker<'a> {
     ) -> TypeResult<'a, TypedFeature<'a>> {
         self.begin_scope();
 
+        self.cur_stack_size = self.cur_class.size_of();
+
         let iter = params.into_vec().into_iter();
         let params = iter
             .map(|param| {
@@ -210,6 +221,10 @@ impl<'a> Checker<'a> {
                     .get_type_or_err(&param.ty)
                     .map_err(|kind| TypeError::new(kind, param.span))?;
                 self.insert_object(param.id, ty);
+                self.cur_stack_size = match ty {
+                    TypeId::SelfType => self.cur_class.align(self.cur_stack_size),
+                    _ => ty.align(self.cur_stack_size),
+                };
                 Ok(TypedFormal::new(param.id, ty, param.span))
             })
             .collect::<TypeResult<Box<_>>>()?;
@@ -229,6 +244,7 @@ impl<'a> Checker<'a> {
                 params,
                 return_ty,
                 body,
+                size: self.cur_stack_size,
             },
             span,
         ))
@@ -422,6 +438,7 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
+        self.cur_stack_size = ty.align(self.cur_stack_size);
         self.insert_object(id, ty);
         let expr = self.check_expr(expr)?;
         self.end_scope();
@@ -480,6 +497,8 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
+        self.cur_stack_size = ty.align(self.cur_stack_size);
+        dbg!(self.cur_stack_size);
         self.insert_object(id, ty);
         let expr = expr
             .map(|expr| {

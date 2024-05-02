@@ -52,6 +52,18 @@ impl BinOp {
             },
         }
     }
+
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Eq => "=",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,15 +341,23 @@ impl<'a> TypedExpr<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedClass<'a> {
     pub id:       &'a str,
+    pub type_id:  TypeId,
     pub parent:   TypeId,
     pub features: Box<[TypedFeature<'a>]>,
     pub span:     Span,
 }
 
 impl<'a> TypedClass<'a> {
-    pub fn new(id: &'a str, parent: TypeId, features: Box<[TypedFeature<'a>]>, span: Span) -> Self {
+    pub fn new(
+        id: &'a str,
+        type_id: TypeId,
+        parent: TypeId,
+        features: Box<[TypedFeature<'a>]>,
+        span: Span,
+    ) -> Self {
         Self {
             id,
+            type_id,
             parent,
             features,
             span,
@@ -352,6 +372,7 @@ pub enum TypedFeatureKind<'a> {
         params:    Box<[TypedFormal<'a>]>,
         return_ty: TypeId,
         body:      TypedExpr<'a>,
+        size:      usize,
     },
 
     Attribute {

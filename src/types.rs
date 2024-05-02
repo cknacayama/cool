@@ -197,6 +197,27 @@ impl TypeId {
     pub const STRING: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
     pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
 
+    pub fn size_of(self) -> usize {
+        match self {
+            TypeId::BOOL => 1,
+            TypeId::INT => 8,
+            _ => 16,
+        }
+    }
+
+    pub fn align(self, cur: usize) -> usize {
+        match self {
+            TypeId::BOOL => cur + 1,
+            _ => {
+                if cur % 8 == 0 {
+                    cur + self.size_of()
+                } else {
+                    cur + 8 - cur % 8 + self.size_of()
+                }
+            }
+        }
+    }
+
     pub fn id(self) -> Option<NonZeroU32> {
         match self {
             TypeId::Class(id) => Some(id.0),
@@ -291,30 +312,38 @@ impl std::fmt::Display for ClassId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MethodTypeData {
+pub struct MethodTypeData<'a> {
+    pub name:      &'a str,
     pub params:    Box<[TypeId]>,
     pub return_ty: TypeId,
 }
 
-impl MethodTypeData {
-    pub fn new(params: Box<[TypeId]>, return_ty: TypeId) -> Self {
-        Self { params, return_ty }
+impl<'a> MethodTypeData<'a> {
+    pub fn new(name: &'a str, params: Box<[TypeId]>, return_ty: TypeId) -> Self {
+        Self {
+            name,
+            params,
+            return_ty,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassTypeData<'a> {
-    parent:     Option<TypeId>,
-    attributes: HashMap<&'a str, TypeId>,
-    methods:    HashMap<&'a str, MethodTypeData>,
-    children:   HashSet<TypeId>,
+    pub id:         &'a str,
+    pub parent:     Option<TypeId>,
+    pub attributes: HashMap<&'a str, TypeId>,
+    pub methods:    HashMap<&'a str, MethodTypeData<'a>>,
+    pub children:   HashSet<TypeId>,
+    pub vtable:     Vec<(&'a str, &'a str)>,
 }
 
 impl<'a> ClassTypeData<'a> {
     pub fn new(
+        id: &'a str,
         parent: Option<TypeId>,
         attributes: HashMap<&'a str, TypeId>,
-        methods: HashMap<&'a str, MethodTypeData>,
+        methods: HashMap<&'a str, MethodTypeData<'a>>,
         children: HashSet<TypeId>,
     ) -> Result<Self, TypeErrorKind<'static>> {
         match parent {
@@ -322,12 +351,7 @@ impl<'a> ClassTypeData<'a> {
             Some(TypeId::BOOL) => Err(TypeErrorKind::CannotInheritFromBool),
             Some(TypeId::INT) => Err(TypeErrorKind::CannotInheritFromInt),
             Some(TypeId::STRING) => Err(TypeErrorKind::CannotInheritFromString),
-            _ => Ok(Self {
-                parent,
-                attributes,
-                methods,
-                children,
-            }),
+            _ => todo!(),
         }
     }
 }
@@ -383,21 +407,26 @@ impl<'a> ClassEnv<'a> {
     pub fn with_builtin() -> Self {
         let mut classes = vec![];
 
+        macro_rules! builtin_method {
+            ($id:literal, [ $($param:expr),* ], $return_ty:expr) => {
+                ($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty))
+            };
+        }
+
         let object = ClassTypeData::new(
+            "Object",
             None,
             HashMap::new(),
             HashMap::from([
-                ("abort", MethodTypeData::new(Box::new([]), TypeId::OBJECT)),
-                (
-                    "type_name",
-                    MethodTypeData::new(Box::new([]), TypeId::STRING),
-                ),
-                ("copy", MethodTypeData::new(Box::new([]), TypeId::SelfType)),
+                builtin_method!("abort", [], TypeId::OBJECT),
+                builtin_method!("type_name", [], TypeId::STRING),
+                builtin_method!("copy", [], TypeId::SelfType),
             ]),
             HashSet::from([TypeId::INT, TypeId::BOOL, TypeId::STRING]),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
+            "Bool",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
@@ -405,6 +434,7 @@ impl<'a> ClassEnv<'a> {
         )
         .unwrap();
         let int = ClassTypeData::new(
+            "Int",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
@@ -412,39 +442,26 @@ impl<'a> ClassEnv<'a> {
         )
         .unwrap();
         let string = ClassTypeData::new(
+            "String",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::from([
-                ("length", MethodTypeData::new(Box::new([]), TypeId::INT)),
-                (
-                    "concat",
-                    MethodTypeData::new(Box::from([TypeId::STRING]), TypeId::STRING),
-                ),
-                (
-                    "substr",
-                    MethodTypeData::new(Box::from([TypeId::INT, TypeId::INT]), TypeId::STRING),
-                ),
+                builtin_method!("length", [], TypeId::INT),
+                builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
+                builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ]),
             HashSet::new(),
         )
         .unwrap();
         let io = ClassTypeData::new(
+            "IO",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::from([
-                (
-                    "out_string",
-                    MethodTypeData::new(Box::from([TypeId::STRING]), TypeId::SelfType),
-                ),
-                (
-                    "out_int",
-                    MethodTypeData::new(Box::from([TypeId::INT]), TypeId::SelfType),
-                ),
-                (
-                    "in_string",
-                    MethodTypeData::new(Box::from([]), TypeId::STRING),
-                ),
-                ("in_int", MethodTypeData::new(Box::from([]), TypeId::INT)),
+                builtin_method!("out_string", [TypeId::STRING], TypeId::SelfType),
+                builtin_method!("out_int", [TypeId::INT], TypeId::SelfType),
+                builtin_method!("in_string", [], TypeId::STRING),
+                builtin_method!("in_int", [], TypeId::INT),
             ]),
             HashSet::new(),
         )
@@ -489,6 +506,10 @@ impl<'a> ClassEnv<'a> {
             Some(class_id) => Err(TypeErrorKind::RedefinedClass(class_id)),
             None => Ok(id),
         }
+    }
+
+    pub fn get_class(&self, ty: TypeId) -> Result<&ClassTypeData<'a>, TypeErrorKind<'a>> {
+        Ok(self.classes.get(ty.to_index_or_err()?).unwrap())
     }
 
     pub fn insert_class(
@@ -539,7 +560,7 @@ impl<'a> ClassEnv<'a> {
         &mut self,
         ty: TypeId,
         method: &'a str,
-        data: MethodTypeData,
+        data: MethodTypeData<'a>,
     ) -> Result<(), TypeErrorKind<'a>> {
         if let Some(parent) = self.get_parent(ty)? {
             match self.get_method(parent, method) {
@@ -708,6 +729,7 @@ mod tests {
         let e = Type::Class("E");
 
         let a_data = ClassTypeData::new(
+            "A",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
@@ -715,6 +737,7 @@ mod tests {
         )
         .unwrap();
         let b_data = ClassTypeData::new(
+            "B",
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
@@ -725,13 +748,16 @@ mod tests {
         let b = env.insert_class(b, b_data).unwrap();
 
         let c_data =
-            ClassTypeData::new(Some(a), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
+            ClassTypeData::new("C", Some(a), HashMap::new(), HashMap::new(), HashSet::new())
+                .unwrap();
         let c = env.insert_class(c, c_data).unwrap();
 
         let d_data =
-            ClassTypeData::new(Some(b), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
+            ClassTypeData::new("D", Some(b), HashMap::new(), HashMap::new(), HashSet::new())
+                .unwrap();
         let e_data =
-            ClassTypeData::new(Some(c), HashMap::new(), HashMap::new(), HashSet::new()).unwrap();
+            ClassTypeData::new("E", Some(c), HashMap::new(), HashMap::new(), HashSet::new())
+                .unwrap();
         let d = env.insert_class(d, d_data).unwrap();
         let e = env.insert_class(e, e_data).unwrap();
 

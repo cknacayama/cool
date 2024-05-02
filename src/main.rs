@@ -5,12 +5,7 @@ fn main() {
     let lexer = Lexer::new(&input);
 
     match SemanticChecker::new(Parser::new(lexer)).check() {
-        Ok((asts, env)) => {
-            for ast in asts {
-                println!("{:#?}", ast);
-            }
-            println!("{:#?}", env);
-        }
+        Ok((asts, env)) => {}
         Err(e) => {
             let (start, end) = e.span.location(&input);
             eprintln!(
