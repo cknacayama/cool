@@ -1,11 +1,17 @@
-use cool::{checker::SemanticChecker, lexer::Lexer, parser::Parser};
+use cool::{checker::SemanticChecker, codegen::CodeGenerator, lexer::Lexer, parser::Parser};
 
 fn main() {
     let input = std::fs::read_to_string("in/test.cl").unwrap();
     let lexer = Lexer::new(&input);
 
     match SemanticChecker::new(Parser::new(lexer)).check() {
-        Ok((asts, env)) => {}
+        Ok((asts, env)) => {
+            let mut codegen = CodeGenerator::new(env);
+            for ast in asts {
+                codegen.gen_class(&ast);
+            }
+            println!("{}", codegen.take_output());
+        }
         Err(e) => {
             let (start, end) = e.span.location(&input);
             eprintln!(

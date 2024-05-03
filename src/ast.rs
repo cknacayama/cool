@@ -340,11 +340,13 @@ impl<'a> TypedExpr<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedClass<'a> {
-    pub id:       &'a str,
-    pub type_id:  TypeId,
-    pub parent:   TypeId,
-    pub features: Box<[TypedFeature<'a>]>,
-    pub span:     Span,
+    pub id:        &'a str,
+    pub type_id:   TypeId,
+    pub parent:    TypeId,
+    pub methods:   Box<[TypedMethod<'a>]>,
+    pub attrs:     Box<[TypedAttribute<'a>]>,
+    pub init_size: usize,
+    pub span:      Span,
 }
 
 impl<'a> TypedClass<'a> {
@@ -352,44 +354,96 @@ impl<'a> TypedClass<'a> {
         id: &'a str,
         type_id: TypeId,
         parent: TypeId,
-        features: Box<[TypedFeature<'a>]>,
+        methods: Box<[TypedMethod<'a>]>,
+        attrs: Box<[TypedAttribute<'a>]>,
+        init_size: usize,
         span: Span,
     ) -> Self {
         Self {
             id,
             type_id,
             parent,
-            features,
+            methods,
+            attrs,
+            init_size,
             span,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypedFeatureKind<'a> {
-    Method {
-        id:        &'a str,
-        params:    Box<[TypedFormal<'a>]>,
-        return_ty: TypeId,
-        body:      TypedExpr<'a>,
-        size:      usize,
-    },
+pub struct TypedMethod<'a> {
+    id:        &'a str,
+    params:    Box<[TypedFormal<'a>]>,
+    return_ty: TypeId,
+    body:      TypedExpr<'a>,
+    size:      usize,
+    pub span:  Span,
+}
 
-    Attribute {
-        id:   &'a str,
-        ty:   TypeId,
-        init: Option<TypedExpr<'a>>,
-    },
+impl<'a> TypedMethod<'a> {
+    pub fn new(
+        id: &'a str,
+        params: Box<[TypedFormal<'a>]>,
+        return_ty: TypeId,
+        body: TypedExpr<'a>,
+        size: usize,
+        span: Span,
+    ) -> Self {
+        Self {
+            id,
+            params,
+            return_ty,
+            body,
+            size,
+            span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedFeature<'a> {
-    pub kind: TypedFeatureKind<'a>,
-    pub span: Span,
+pub struct TypedAttribute<'a> {
+    id:     &'a str,
+    ty:     TypeId,
+    init:   Option<TypedExpr<'a>>,
+    offset: usize,
+    span:   Span,
 }
 
-impl<'a> TypedFeature<'a> {
-    pub fn new(kind: TypedFeatureKind<'a>, span: Span) -> Self {
-        Self { kind, span }
+impl<'a> TypedAttribute<'a> {
+    pub fn new(
+        id: &'a str,
+        ty: TypeId,
+        init: Option<TypedExpr<'a>>,
+        offset: usize,
+        span: Span,
+    ) -> Self {
+        Self {
+            id,
+            ty,
+            init,
+            offset,
+            span,
+        }
+    }
+
+    pub fn id(&self) -> &'a str {
+        self.id
+    }
+
+    pub fn ty(&self) -> TypeId {
+        self.ty
+    }
+
+    pub fn init(&self) -> Option<&TypedExpr<'a>> {
+        self.init.as_ref()
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
     }
 }

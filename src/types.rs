@@ -205,7 +205,20 @@ impl TypeId {
         }
     }
 
-    pub fn align(self, cur: usize) -> usize {
+    pub fn align_offset(self, cur: usize) -> usize {
+        match self {
+            TypeId::BOOL => cur,
+            _ => {
+                if cur % 8 == 0 {
+                    cur
+                } else {
+                    cur + 8 - cur % 8
+                }
+            }
+        }
+    }
+
+    pub fn align_size(self, cur: usize) -> usize {
         match self {
             TypeId::BOOL => cur + 1,
             _ => {
@@ -313,9 +326,9 @@ impl std::fmt::Display for ClassId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodTypeData<'a> {
-    pub name:      &'a str,
-    pub params:    Box<[TypeId]>,
-    pub return_ty: TypeId,
+    name:      &'a str,
+    params:    Box<[TypeId]>,
+    return_ty: TypeId,
 }
 
 impl<'a> MethodTypeData<'a> {
@@ -326,33 +339,77 @@ impl<'a> MethodTypeData<'a> {
             return_ty,
         }
     }
+
+    pub fn name(&self) -> &'a str {
+        self.name
+    }
+
+    pub fn params(&self) -> &[TypeId] {
+        &self.params
+    }
+
+    pub fn return_ty(&self) -> TypeId {
+        self.return_ty
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassTypeData<'a> {
-    pub id:         &'a str,
-    pub parent:     Option<TypeId>,
-    pub attributes: HashMap<&'a str, TypeId>,
-    pub methods:    HashMap<&'a str, MethodTypeData<'a>>,
-    pub children:   HashSet<TypeId>,
-    pub vtable:     Vec<(&'a str, &'a str)>,
+    id:         &'a str,
+    parent:     Option<TypeId>,
+    attrs:      HashMap<&'a str, TypeId>,
+    attrs_size: usize, // this includes the size of the parent class
+    methods:    HashMap<&'a str, MethodTypeData<'a>>,
+    vtable:     Vec<(&'a str, &'a str)>,
 }
 
 impl<'a> ClassTypeData<'a> {
     pub fn new(
         id: &'a str,
         parent: Option<TypeId>,
-        attributes: HashMap<&'a str, TypeId>,
+        attrs: HashMap<&'a str, TypeId>,
+        attrs_size: usize,
         methods: HashMap<&'a str, MethodTypeData<'a>>,
-        children: HashSet<TypeId>,
+        vtable: Vec<(&'a str, &'a str)>,
     ) -> Result<Self, TypeErrorKind<'static>> {
         match parent {
             Some(TypeId::SelfType) => Err(TypeErrorKind::CannotInheritFromSelf),
             Some(TypeId::BOOL) => Err(TypeErrorKind::CannotInheritFromBool),
             Some(TypeId::INT) => Err(TypeErrorKind::CannotInheritFromInt),
             Some(TypeId::STRING) => Err(TypeErrorKind::CannotInheritFromString),
-            _ => todo!(),
+            _ => Ok(Self {
+                id,
+                parent,
+                attrs,
+                attrs_size,
+                methods,
+                vtable,
+            }),
         }
+    }
+
+    pub fn id(&self) -> &'a str {
+        self.id
+    }
+
+    pub fn parent(&self) -> Option<TypeId> {
+        self.parent
+    }
+
+    pub fn attrs(&self) -> &HashMap<&'a str, TypeId> {
+        &self.attrs
+    }
+
+    pub fn attrs_size(&self) -> usize {
+        self.attrs_size
+    }
+
+    pub fn methods(&self) -> &HashMap<&'a str, MethodTypeData<'a>> {
+        &self.methods
+    }
+
+    pub fn vtable(&self) -> &[(&'a str, &'a str)] {
+        &self.vtable
     }
 }
 
@@ -396,15 +453,8 @@ impl<'a> Default for ClassEnv<'a> {
 }
 
 impl<'a> ClassEnv<'a> {
-    pub fn new() -> Self {
-        Self {
-            types:   HashMap::new(),
-            classes: vec![],
-        }
-    }
-
     /// Create a new ClassEnv with the built-in classes.
-    pub fn with_builtin() -> Self {
+    pub fn new() -> Self {
         let mut classes = vec![];
 
         macro_rules! builtin_method {
@@ -413,57 +463,68 @@ impl<'a> ClassEnv<'a> {
             };
         }
 
+        macro_rules! builtin_vtable {
+            ($id:literal, [ $($method:expr),* ]) => {
+                vec![ ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+            };
+        }
+
         let object = ClassTypeData::new(
             "Object",
             None,
             HashMap::new(),
+            0,
             HashMap::from([
                 builtin_method!("abort", [], TypeId::OBJECT),
                 builtin_method!("type_name", [], TypeId::STRING),
                 builtin_method!("copy", [], TypeId::SelfType),
             ]),
-            HashSet::from([TypeId::INT, TypeId::BOOL, TypeId::STRING]),
+            builtin_vtable!("Object", []),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
             "Bool",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::new(),
-            HashSet::new(),
+            builtin_vtable!("Bool", []),
         )
         .unwrap();
         let int = ClassTypeData::new(
             "Int",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::new(),
-            HashSet::new(),
+            builtin_vtable!("Int", []),
         )
         .unwrap();
         let string = ClassTypeData::new(
             "String",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::from([
                 builtin_method!("length", [], TypeId::INT),
                 builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
                 builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ]),
-            HashSet::new(),
+            builtin_vtable!("String", ["length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
             "IO",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::from([
                 builtin_method!("out_string", [TypeId::STRING], TypeId::SelfType),
                 builtin_method!("out_int", [TypeId::INT], TypeId::SelfType),
                 builtin_method!("in_string", [], TypeId::STRING),
                 builtin_method!("in_int", [], TypeId::INT),
             ]),
-            HashSet::new(),
+            builtin_vtable!("IO", ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
 
@@ -523,14 +584,6 @@ impl<'a> ClassEnv<'a> {
 
         let id = self.insert_type(ty)?;
 
-        if let Some(parent) = data.parent {
-            self.classes
-                .get_mut(parent.to_index().unwrap())
-                .unwrap()
-                .children
-                .insert(id);
-        }
-
         self.classes.push(data);
 
         Ok(id)
@@ -574,13 +627,14 @@ impl<'a> ClassEnv<'a> {
             }
         }
 
-        match self
-            .classes
-            .get_mut(ty.to_index_or_err()?)
-            .unwrap()
-            .methods
-            .insert(method, data)
-        {
+        let class_data = &mut self.classes[ty.to_index_or_err()?];
+
+        match class_data.vtable.iter_mut().find(|(_, m)| *m == method) {
+            Some((id, _)) => *id = class_data.id,
+            None => class_data.vtable.push((class_data.id, method)),
+        }
+
+        match class_data.methods.insert(method, data) {
             Some(_) => Err(TypeErrorKind::RedefinedMethod(ty, method)),
             None => Ok(()),
         }
@@ -590,7 +644,7 @@ impl<'a> ClassEnv<'a> {
         let mut data = &self.classes[ty.to_index_or_err()?];
 
         loop {
-            if let Some(data) = data.attributes.get(attr) {
+            if let Some(data) = data.attrs.get(attr) {
                 return Ok(*data);
             }
             match data.parent {
@@ -608,15 +662,18 @@ impl<'a> ClassEnv<'a> {
         attr: &'a str,
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
-        match self
-            .classes
-            .get_mut(ty.to_index_or_err()?)
-            .unwrap()
-            .attributes
-            .insert(attr, data)
-        {
-            Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
-            None => Ok(()),
+        match self.get_attribute(ty, attr) {
+            Ok(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
+            Err(_) => {
+                let class_data = &mut self.classes[ty.to_index_or_err()?];
+                match class_data.attrs.insert(attr, data) {
+                    Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
+                    None => {
+                        class_data.attrs_size = data.align_size(class_data.attrs_size);
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 
@@ -720,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_join() {
-        let mut env = ClassEnv::with_builtin();
+        let mut env = ClassEnv::new();
 
         let a = Type::Class("A");
         let b = Type::Class("B");
@@ -732,32 +789,31 @@ mod tests {
             "A",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::new(),
-            HashSet::new(),
+            vec![],
         )
         .unwrap();
         let b_data = ClassTypeData::new(
             "B",
             Some(TypeId::OBJECT),
             HashMap::new(),
+            0,
             HashMap::new(),
-            HashSet::new(),
+            vec![],
         )
         .unwrap();
         let a = env.insert_class(a, a_data).unwrap();
         let b = env.insert_class(b, b_data).unwrap();
 
         let c_data =
-            ClassTypeData::new("C", Some(a), HashMap::new(), HashMap::new(), HashSet::new())
-                .unwrap();
+            ClassTypeData::new("C", Some(a), HashMap::new(), 0, HashMap::new(), vec![]).unwrap();
         let c = env.insert_class(c, c_data).unwrap();
 
         let d_data =
-            ClassTypeData::new("D", Some(b), HashMap::new(), HashMap::new(), HashSet::new())
-                .unwrap();
+            ClassTypeData::new("D", Some(b), HashMap::new(), 0, HashMap::new(), vec![]).unwrap();
         let e_data =
-            ClassTypeData::new("E", Some(c), HashMap::new(), HashMap::new(), HashSet::new())
-                .unwrap();
+            ClassTypeData::new("E", Some(c), HashMap::new(), 0, HashMap::new(), vec![]).unwrap();
         let d = env.insert_class(d, d_data).unwrap();
         let e = env.insert_class(e, e_data).unwrap();
 

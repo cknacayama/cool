@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     ast::*,
@@ -10,10 +10,13 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Checker<'a> {
-    object_envs:    Vec<ObjectEnv<'a>>,
-    cur_class:      TypeId,
-    cur_stack_size: usize,
-    class_env:      ClassEnv<'a>,
+    object_envs:     Vec<ObjectEnv<'a>>,
+    is_in_method:    bool,
+    cur_class:       TypeId,
+    cur_stack_size:  usize,
+    cur_init_size:   usize,
+    cur_attr_offset: usize,
+    class_env:       ClassEnv<'a>,
 }
 
 impl<'a> Default for Checker<'a> {
@@ -24,11 +27,15 @@ impl<'a> Default for Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new() -> Self {
+        dbg!(std::mem::size_of::<Checker>());
         Self {
-            object_envs:    vec![],
-            cur_stack_size: 0,
-            class_env:      ClassEnv::with_builtin(),
-            cur_class:      TypeId::SelfType,
+            object_envs:     vec![],
+            cur_stack_size:  0,
+            cur_init_size:   0,
+            cur_attr_offset: 0,
+            is_in_method:    false,
+            class_env:       ClassEnv::new(),
+            cur_class:       TypeId::SelfType,
         }
     }
 
@@ -115,12 +122,21 @@ impl<'a> Checker<'a> {
             .get_type_or_err(&parent)
             .map_err(|kind| TypeError::new(kind, span))?;
 
+        let parent_data = self.class_env.get_class(parent).unwrap();
+
+        self.cur_attr_offset = parent_data.attrs_size();
+        self.cur_init_size = 8;
+
+        let mut vtable = parent_data.vtable().to_vec();
+        vtable[1].0 = id;
+
         let data = ClassTypeData::new(
             id,
             Some(parent),
             HashMap::new(),
+            self.cur_attr_offset,
             HashMap::new(),
-            HashSet::new(),
+            vtable,
         )
         .map_err(|kind| TypeError::new(kind, span))?;
 
@@ -132,74 +148,83 @@ impl<'a> Checker<'a> {
         self.cur_class = ty;
 
         self.begin_scope();
+
         self.insert_object("self", ty);
 
-        let checked_features = features
-            .into_vec()
-            .into_iter()
-            .map(|feature| self.check_feature(feature))
-            .collect::<TypeResult<Box<_>>>()?;
-        self.end_scope();
+        let mut attrs = vec![];
+        let mut methods = vec![];
+
+        for feature in features.into_vec().into_iter() {
+            match feature.kind {
+                FeatureKind::Method {
+                    id,
+                    params,
+                    return_ty,
+                    body,
+                } => {
+                    let method = self.check_method(id, params, return_ty, body, feature.span)?;
+                    methods.push(method);
+                }
+                FeatureKind::Attribute {
+                    id,
+                    ty: attr_ty,
+                    init,
+                } => {
+                    let attribute = self.check_attribute(id, attr_ty, init, feature.span)?;
+                    attrs.push(attribute);
+                }
+            }
+        }
+
+        let attrs = attrs.into_boxed_slice();
+        let methods = methods.into_boxed_slice();
 
         self.cur_class = TypeId::SelfType;
 
-        Ok(TypedClass::new(id, ty, parent, checked_features, span))
+        self.end_scope();
+
+        Ok(TypedClass::new(
+            id,
+            ty,
+            parent,
+            methods,
+            attrs,
+            self.cur_init_size,
+            span,
+        ))
     }
 
-    fn check_feature(&mut self, feature: Feature<'a>) -> TypeResult<'a, TypedFeature<'a>> {
+    fn check_attribute(
+        &mut self,
+        id: &'a str,
+        attr_ty: Type<'a>,
+        init: Option<Expr<'a>>,
+        span: Span,
+    ) -> TypeResult<'a, TypedAttribute<'a>> {
         let ty = self.cur_class;
-        match feature.kind {
-            FeatureKind::Method {
-                id,
-                params,
-                return_ty,
-                body,
-            } => {
-                let method_ty = MethodTypeData {
-                    name:      id,
-                    params:    params
-                        .iter()
-                        .map(|formal| {
-                            self.get_type_or_err(&formal.ty)
-                                .map_err(|kind| TypeError::new(kind, formal.span))
-                        })
-                        .collect::<TypeResult<Box<_>>>()?,
-                    return_ty: self
-                        .get_type_or_err(&return_ty)
-                        .map_err(|kind| TypeError::new(kind, feature.span))?,
-                };
-                self.insert_method(ty, id, method_ty)
-                    .map_err(|kind| TypeError::new(kind, feature.span))?;
-                self.check_method(id, params, return_ty, body, feature.span)
-            }
-            FeatureKind::Attribute {
-                id,
-                ty: attr_ty,
-                init,
-            } => {
-                let attr_ty = self
-                    .get_type_or_err(&attr_ty)
-                    .map_err(|kind| TypeError::new(kind, feature.span))?;
-                let init = init
-                    .map(|init| {
-                        let init = self.check_expr(init)?;
-                        self.is_subtype(init.ty, attr_ty)
-                            .map_err(|kind| TypeError::new(kind, init.span))
-                            .map(|_| init)
-                    })
-                    .transpose()?;
-                self.insert_attribute(ty, id, attr_ty)
-                    .map_err(|kind| TypeError::new(kind, feature.span))?;
-                Ok(TypedFeature::new(
-                    TypedFeatureKind::Attribute {
-                        id,
-                        ty: attr_ty,
-                        init,
-                    },
-                    feature.span,
-                ))
-            }
-        }
+        let attr_ty = self
+            .get_type_or_err(&attr_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
+        let init = init
+            .map(|init| {
+                let init = self.check_expr(init)?;
+                self.is_subtype(init.ty, attr_ty)
+                    .map_err(|kind| TypeError::new(kind, init.span))
+                    .map(|_| init)
+            })
+            .transpose()?;
+        self.insert_attribute(ty, id, attr_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
+
+        self.cur_attr_offset = attr_ty.align_offset(self.cur_attr_offset);
+
+        Ok(TypedAttribute::new(
+            id,
+            attr_ty,
+            init,
+            self.cur_attr_offset,
+            span,
+        ))
     }
 
     fn check_method(
@@ -209,7 +234,22 @@ impl<'a> Checker<'a> {
         return_ty: Type<'a>,
         body: Expr<'a>,
         span: Span,
-    ) -> TypeResult<'a, TypedFeature<'a>> {
+    ) -> TypeResult<'a, TypedMethod<'a>> {
+        self.is_in_method = true;
+        let ty = self.cur_class;
+        let method_params = params
+            .iter()
+            .map(|formal| {
+                self.get_type_or_err(&formal.ty)
+                    .map_err(|kind| TypeError::new(kind, formal.span))
+            })
+            .collect::<TypeResult<Box<_>>>()?;
+        let method_return_ty = self
+            .get_type_or_err(&return_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
+        let method_ty = MethodTypeData::new(id, method_params, method_return_ty);
+        self.insert_method(ty, id, method_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
         self.begin_scope();
 
         self.cur_stack_size = self.cur_class.size_of();
@@ -221,10 +261,7 @@ impl<'a> Checker<'a> {
                     .get_type_or_err(&param.ty)
                     .map_err(|kind| TypeError::new(kind, param.span))?;
                 self.insert_object(param.id, ty);
-                self.cur_stack_size = match ty {
-                    TypeId::SelfType => self.cur_class.align(self.cur_stack_size),
-                    _ => ty.align(self.cur_stack_size),
-                };
+                self.cur_stack_size = ty.align_size(self.cur_stack_size);
                 Ok(TypedFormal::new(param.id, ty, param.span))
             })
             .collect::<TypeResult<Box<_>>>()?;
@@ -238,14 +275,14 @@ impl<'a> Checker<'a> {
             .map_err(|kind| TypeError::new(kind, body.span))?;
         self.end_scope();
 
-        Ok(TypedFeature::new(
-            TypedFeatureKind::Method {
-                id,
-                params,
-                return_ty,
-                body,
-                size: self.cur_stack_size,
-            },
+        self.is_in_method = false;
+
+        Ok(TypedMethod::new(
+            id,
+            params,
+            return_ty,
+            body,
+            self.cur_stack_size,
             span,
         ))
     }
@@ -438,7 +475,11 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        self.cur_stack_size = ty.align(self.cur_stack_size);
+        if self.is_in_method {
+            self.cur_stack_size = ty.align_size(self.cur_stack_size);
+        } else {
+            self.cur_init_size = ty.align_size(self.cur_init_size);
+        }
         self.insert_object(id, ty);
         let expr = self.check_expr(expr)?;
         self.end_scope();
@@ -497,8 +538,11 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        self.cur_stack_size = ty.align(self.cur_stack_size);
-        dbg!(self.cur_stack_size);
+        if self.is_in_method {
+            self.cur_stack_size = ty.align_size(self.cur_stack_size);
+        } else {
+            self.cur_init_size = ty.align_size(self.cur_init_size);
+        }
         self.insert_object(id, ty);
         let expr = expr
             .map(|expr| {
@@ -527,12 +571,12 @@ impl<'a> Checker<'a> {
         let method_ty = self
             .get_method(ty, method)
             .map_err(|kind| TypeError::new(kind, span))?;
-        let return_ty = method_ty.return_ty.map_self_type(|| ty);
+        let return_ty = method_ty.return_ty().map_self_type(|| ty);
 
-        if args.len() != method_ty.params.len() {
+        if args.len() != method_ty.params().len() {
             return Err(TypeError::new(
                 TypeErrorKind::ExpectedArity {
-                    expected: method_ty.params.len(),
+                    expected: method_ty.params().len(),
                     found:    args.len(),
                 },
                 span,
@@ -541,7 +585,7 @@ impl<'a> Checker<'a> {
 
         let args = args
             .into_iter()
-            .zip(method_ty.params.iter().copied())
+            .zip(method_ty.params().iter().copied())
             .map(|(arg, ty)| {
                 self.is_subtype(arg.ty, ty)
                     .map_err(|kind| TypeError::new(kind, arg.span))
@@ -582,10 +626,10 @@ impl<'a> Checker<'a> {
             .get_method(ty, method)
             .map_err(|kind| TypeError::new(kind, span))?;
 
-        if args.len() != method_ty.params.len() {
+        if args.len() != method_ty.params().len() {
             return Err(TypeError::new(
                 TypeErrorKind::ExpectedArity {
-                    expected: method_ty.params.len(),
+                    expected: method_ty.params().len(),
                     found:    args.len(),
                 },
                 span,
@@ -594,7 +638,7 @@ impl<'a> Checker<'a> {
 
         let args = args
             .into_iter()
-            .zip(method_ty.params.iter().copied())
+            .zip(method_ty.params().iter().copied())
             .map(|(arg, ty)| {
                 self.is_subtype(arg.ty, ty)
                     .map_err(|kind| TypeError::new(kind, arg.span))
@@ -602,7 +646,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<TypeResult<Box<_>>>()?;
 
-        let return_ty = method_ty.return_ty.map_self_type(|| ty);
+        let return_ty = method_ty.return_ty().map_self_type(|| ty);
 
         Ok(TypedExpr::new(
             TypedExprKind::Dispatch(Box::new(expr), ty, method, args),
