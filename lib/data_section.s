@@ -1,4 +1,3 @@
-    .data
 Object_Table:
     .quad Object_New
     .quad Object_abort
@@ -72,6 +71,12 @@ _empty_string:
 _empty_stringlen:
     .quad 0
 
-    .align 8
+_io_out_int_buf_size:
+    .quad 21
+
+    .bss 
 heap_pos:
     .quad 0
+_io_out_int_buf:
+    .skip 21
+

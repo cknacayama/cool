@@ -163,12 +163,12 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> ParseResult<(Type<'a>, Span)> {
         let token = self.next_or_eof()?;
         let ty = match token.kind {
-            TokenKind::Id("SELF_TYPE") => Type::SelfType,
-            TokenKind::Id("Bool") => Type::Bool,
-            TokenKind::Id("Int") => Type::Int,
-            TokenKind::Id("String") => Type::String,
-            TokenKind::Id("Object") => Type::Object,
-            TokenKind::Id(id) if id.chars().next().unwrap().is_uppercase() => Type::Class(id),
+            TokenKind::ClassId("SELF_TYPE") => Type::SelfType,
+            TokenKind::ClassId("Bool") => Type::Bool,
+            TokenKind::ClassId("Int") => Type::Int,
+            TokenKind::ClassId("String") => Type::String,
+            TokenKind::ClassId("Object") => Type::Object,
+            TokenKind::ClassId(id) => Type::Class(id),
             _ => return Err(ParseError::new(ParseErrorKind::ExpectedType, token.span)),
         };
         Ok((ty, token.span))
@@ -218,6 +218,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_class_id(&mut self) -> ParseResult<(&'a str, Span)> {
+        let token = self.next_or_eof()?;
+        match token.kind {
+            TokenKind::ClassId(id) => Ok((id, token.span)),
+            _ => Err(ParseError::new(ParseErrorKind::ExpectedId, token.span)),
+        }
+    }
+
     fn parse_formal(&mut self) -> ParseResult<Formal<'a>> {
         let (id, span) = self.parse_id()?;
         self.expect(TokenKind::Colon)?;
@@ -232,10 +240,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_class(&mut self) -> ParseResult<Class<'a>> {
         let span = self.expect(TokenKind::KwClass)?;
-        let (id, id_span) = self.parse_id()?;
-        if id.chars().next().unwrap().is_lowercase() {
-            return Err(ParseError::new(ParseErrorKind::ExpectedType, id_span));
-        }
+        let (id, _) = self.parse_class_id()?;
         let parent = if self.next_if(TokenKind::KwInherits).is_some() {
             self.parse_type()?.0
         } else {

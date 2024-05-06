@@ -179,7 +179,13 @@ impl<'a> Lexer<'a> {
         let s = std::str::from_utf8(s).unwrap();
         match TokenKind::keyword(s) {
             Some(kw) => self.make_token(kw),
-            None => self.make_token(TokenKind::Id(s)),
+            None => {
+                if s.chars().next().unwrap().is_ascii_uppercase() {
+                    self.make_token(TokenKind::ClassId(s))
+                } else {
+                    self.make_token(TokenKind::Id(s))
+                }
+            }
         }
     }
 
@@ -387,7 +393,7 @@ world"
 
     #[test]
     fn test_all_tokens() {
-        let input = r#"123 "hello world" abc 
+        let input = r#"123 "hello world" abc A
 { } ( ) . @ ~ * / + - = < <= <- => : , ; 
 class else false fi 
 if in inherits isvoid 
@@ -399,6 +405,7 @@ let loop pool then while case esac new of not true"#;
             TokenKind::Int("123"),
             TokenKind::String(Cow::from("hello world")),
             TokenKind::Id("abc"),
+            TokenKind::ClassId("A"),
             TokenKind::LBrace,
             TokenKind::RBrace,
             TokenKind::LParen,

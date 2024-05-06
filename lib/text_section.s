@@ -224,8 +224,50 @@ IO_out_string:
 # TODO: implement IO_out_int
     .globl IO_out_int
 IO_out_int:
-    mov     rax, QWORD PTR [rsp + 8]
-    mov     rdx, QWORD PTR [rsp + 16]
+    push    rbp
+    mov     rbp, rsp
+
+    mov     rdi, QWORD PTR [rbp + 32] # n
+    lea     r10, BYTE PTR [rip + _io_out_int_buf] # buf
+    mov     BYTE PTR [r10 + 20], 10 # '\n'
+    mov     r8, 1 # len
+    mov     r9, 19
+    mov     rcx, 10
+    mov     rsi, rdi
+    shr     rdi, 63 # check if n < 0
+    cmp     dil, 0
+    je      .IO_out_int_L1
+    neg     rsi
+.IO_out_int_L1:
+    mov     rax, rsi
+    cqo
+    idiv    rcx
+    # quotient in rax, remainder in rdx
+    add     rdx, 48 # n % 10 + '0'
+    mov     BYTE PTR [r10 + r9], dl
+    inc     r8
+    dec     r9
+    mov     rsi, rax
+    cmp     rsi, 0
+    jne     .IO_out_int_L1
+
+    cmp     dil, 0
+    je      .IO_out_int_L2
+    mov     BYTE PTR [r10 + r9], 45 # '-'
+    inc     r8
+.IO_out_int_L2:
+    mov     rax, 1
+    mov     rdi, 1
+    mov     r9, 21
+    sub     r9, r8
+    lea     rsi, BYTE PTR [r10 + r9]
+    mov     rdx, r8
+    syscall
+
+    mov     rax, QWORD PTR [rbp + 16]
+    mov     rdx, QWORD PTR [rbp + 24]
+
+    pop     rbp
     ret
 
 # TODO: implement IO_in_string
@@ -285,7 +327,7 @@ memory_copy:
     cmp     rax, QWORD PTR [rsp + 24] # size
     jae     .memory_copy_L2
     movzx   ecx, BYTE PTR [rsi + rax]
-    mov     BYTE PTR [rdi + rax], ch
+    mov     BYTE PTR [rdi + rax], cl
     inc     rax
     jmp     .memory_copy_L1
 .memory_copy_L2:

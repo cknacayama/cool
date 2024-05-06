@@ -6,7 +6,8 @@ use crate::span::Span;
 pub enum TokenKind<'a> {
     Int(&'a str),
     String(Cow<'a, str>),
-    Id(&'a str),
+    Id(&'a str),      // identifier (starts with a lower-case letter or an underscore)
+    ClassId(&'a str), // Class/Type identifier (starts with an upper-case letter)
 
     LBrace,
     RBrace,
@@ -53,7 +54,8 @@ pub enum TokenKind<'a> {
 
 impl<'a> TokenKind<'a> {
     pub fn keyword(s: &str) -> Option<TokenKind<'static>> {
-        match s {
+        let s = s.to_ascii_lowercase();
+        match s.as_str() {
             "class" => Some(TokenKind::KwClass),
             "else" => Some(TokenKind::KwElse),
             "false" => Some(TokenKind::KwFalse),
