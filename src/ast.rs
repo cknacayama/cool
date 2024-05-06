@@ -281,8 +281,11 @@ pub enum TypedExprKind<'a> {
     /// id <- expr
     Assign(&'a str, Box<TypedExpr<'a>>),
 
+    /// expr.id([expr [, expr]*])
+    Dispatch(Box<TypedExpr<'a>>, &'a str, Box<[TypedExpr<'a>]>),
+
     /// expr[@type].id([expr [, expr]*])
-    Dispatch(Box<TypedExpr<'a>>, TypeId, &'a str, Box<[TypedExpr<'a>]>),
+    StaticDispatch(Box<TypedExpr<'a>>, TypeId, &'a str, Box<[TypedExpr<'a>]>),
 
     /// id([expr [, expr]*]) (self dispatch)
     SelfDispatch(&'a str, Box<[TypedExpr<'a>]>),
@@ -398,6 +401,26 @@ impl<'a> TypedMethod<'a> {
             size,
             span,
         }
+    }
+
+    pub fn id(&self) -> &'a str {
+        self.id
+    }
+
+    pub fn params(&self) -> &[TypedFormal<'a>] {
+        &self.params
+    }
+
+    pub fn return_ty(&self) -> TypeId {
+        self.return_ty
+    }
+
+    pub fn body(&self) -> &TypedExpr<'a> {
+        &self.body
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
     }
 }
 

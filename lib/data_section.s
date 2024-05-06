@@ -1,4 +1,3 @@
-    .intel_syntax noprefix
     .data
 Object_Table:
     .quad Object_New
@@ -39,36 +38,40 @@ IO_Table:
 
 Object_Typename:
     .string "Object"
+    .align 8
 Object_Typenamelen:
-    .quad .-Object_Typename-1
+    .quad 6
 
 IO_Typename:
     .string "IO"
+    .align 8
 IO_Typenamelen:
-    .quad .-IO_Typename-1
+    .quad 2
 
 String_Typename:
     .string "String"
+    .align 8
 String_Typenamelen:
-    .quad .-String_Typename-1
+    .quad 6
 
 Int_Typename:
     .string "Int"
+    .align 8
 Int_Typenamelen:
-    .quad .-Int_Typename-1
+    .quad 3
 
 Bool_Typename:
     .string "Bool"
+    .align 8
 Bool_Typenamelen:
-    .quad .-Bool_Typename-1
+    .quad 4
 
 _empty_string:
     .string ""
+    .align 8
 _empty_stringlen:
     .quad 0
 
-_int_fmt_string:
-    .string "%ld"
-_int_fmt_stringlen:
-    .quad .-_int_fmt_string-1
-
+    .align 8
+heap_pos:
+    .quad 0

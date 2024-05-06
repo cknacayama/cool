@@ -197,6 +197,20 @@ impl TypeId {
     pub const STRING: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
     pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
 
+    #[inline]
+    pub fn align(size: usize, alignment: usize) -> usize {
+        assert!(alignment.is_power_of_two());
+        (size + alignment - 1) & !(alignment - 1)
+    }
+
+    #[inline]
+    fn alignment(self) -> usize {
+        match self {
+            TypeId::BOOL => 1,
+            _ => 8,
+        }
+    }
+
     pub fn size_of(self) -> usize {
         match self {
             TypeId::BOOL => 1,
@@ -206,29 +220,11 @@ impl TypeId {
     }
 
     pub fn align_offset(self, cur: usize) -> usize {
-        match self {
-            TypeId::BOOL => cur,
-            _ => {
-                if cur % 8 == 0 {
-                    cur
-                } else {
-                    cur + 8 - cur % 8
-                }
-            }
-        }
+        Self::align(cur, self.alignment())
     }
 
     pub fn align_size(self, cur: usize) -> usize {
-        match self {
-            TypeId::BOOL => cur + 1,
-            _ => {
-                if cur % 8 == 0 {
-                    cur + self.size_of()
-                } else {
-                    cur + 8 - cur % 8 + self.size_of()
-                }
-            }
-        }
+        Self::align(cur, self.alignment()) + self.size_of()
     }
 
     pub fn id(self) -> Option<NonZeroU32> {
@@ -411,6 +407,16 @@ impl<'a> ClassTypeData<'a> {
     pub fn vtable(&self) -> &[(&'a str, &'a str)] {
         &self.vtable
     }
+
+    pub fn get_vtable_entry(&self, method: &str) -> Option<&str> {
+        self.vtable
+            .iter()
+            .find_map(|(id, m)| if *m == method { Some(*id) } else { None })
+    }
+
+    pub fn get_vtable_offset(&self, method: &str) -> Option<usize> {
+        self.vtable.iter().position(|(_, m)| *m == method)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,7 +471,7 @@ impl<'a> ClassEnv<'a> {
 
         macro_rules! builtin_vtable {
             ($id:literal, [ $($method:expr),* ]) => {
-                vec![ ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+                vec![ ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
             };
         }
 
@@ -524,7 +530,16 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("in_string", [], TypeId::STRING),
                 builtin_method!("in_int", [], TypeId::INT),
             ]),
-            builtin_vtable!("IO", ["out_string", "out_int", "in_string", "in_int"]),
+            vec![
+                ("IO", "New"),
+                ("Object", "abort"),
+                ("IO", "type_name"),
+                ("Object", "copy"),
+                ("IO", "out_string"),
+                ("IO", "out_int"),
+                ("IO", "in_string"),
+                ("IO", "in_int"),
+            ],
         )
         .unwrap();
 
@@ -833,5 +848,100 @@ mod tests {
         assert_eq!(env.join_fold([a, c, e], a), Ok(a));
         assert_eq!(env.join_fold([c, d, e], a), Ok(TypeId::OBJECT));
         assert_eq!(env.join_fold([a, b, c, d, e], a), Ok(TypeId::OBJECT));
+    }
+
+    #[test]
+    fn test_align_0() {
+        assert_eq!(TypeId::OBJECT.size_of(), 16);
+        assert_eq!(TypeId::OBJECT.align_offset(0), 0);
+        assert_eq!(TypeId::OBJECT.align_size(0), 16);
+
+        assert_eq!(TypeId::INT.size_of(), 8);
+        assert_eq!(TypeId::INT.align_offset(0), 0);
+        assert_eq!(TypeId::INT.align_size(0), 8);
+
+        assert_eq!(TypeId::BOOL.size_of(), 1);
+        assert_eq!(TypeId::BOOL.align_offset(0), 0);
+        assert_eq!(TypeId::BOOL.align_size(0), 1);
+
+        assert_eq!(TypeId::STRING.size_of(), 16);
+        assert_eq!(TypeId::STRING.align_offset(0), 0);
+        assert_eq!(TypeId::STRING.align_size(0), 16);
+
+        assert_eq!(TypeId::IO.size_of(), 16);
+        assert_eq!(TypeId::IO.align_offset(0), 0);
+        assert_eq!(TypeId::IO.align_size(0), 16);
+    }
+
+    #[test]
+    fn test_align_8() {
+        assert_eq!(TypeId::OBJECT.align_offset(8), 8);
+        assert_eq!(TypeId::OBJECT.align_size(8), 24);
+
+        assert_eq!(TypeId::INT.align_offset(8), 8);
+        assert_eq!(TypeId::INT.align_size(8), 16);
+
+        assert_eq!(TypeId::BOOL.align_offset(8), 8);
+        assert_eq!(TypeId::BOOL.align_size(8), 9);
+
+        assert_eq!(TypeId::STRING.align_offset(8), 8);
+        assert_eq!(TypeId::STRING.align_size(8), 24);
+
+        assert_eq!(TypeId::IO.align_offset(8), 8);
+        assert_eq!(TypeId::IO.align_size(8), 24);
+    }
+
+    #[test]
+    fn test_align_16() {
+        assert_eq!(TypeId::OBJECT.align_offset(16), 16);
+        assert_eq!(TypeId::OBJECT.align_size(16), 32);
+
+        assert_eq!(TypeId::INT.align_offset(16), 16);
+        assert_eq!(TypeId::INT.align_size(16), 24);
+
+        assert_eq!(TypeId::BOOL.align_offset(16), 16);
+        assert_eq!(TypeId::BOOL.align_size(16), 17);
+
+        assert_eq!(TypeId::STRING.align_offset(16), 16);
+        assert_eq!(TypeId::STRING.align_size(16), 32);
+
+        assert_eq!(TypeId::IO.align_offset(16), 16);
+        assert_eq!(TypeId::IO.align_size(16), 32);
+    }
+
+    #[test]
+    fn test_align_3() {
+        assert_eq!(TypeId::OBJECT.align_offset(3), 8);
+        assert_eq!(TypeId::OBJECT.align_size(3), 24);
+
+        assert_eq!(TypeId::INT.align_offset(3), 8);
+        assert_eq!(TypeId::INT.align_size(3), 16);
+
+        assert_eq!(TypeId::BOOL.align_offset(3), 3);
+        assert_eq!(TypeId::BOOL.align_size(3), 4);
+
+        assert_eq!(TypeId::STRING.align_offset(3), 8);
+        assert_eq!(TypeId::STRING.align_size(3), 24);
+
+        assert_eq!(TypeId::IO.align_offset(3), 8);
+        assert_eq!(TypeId::IO.align_size(3), 24);
+    }
+
+    #[test]
+    fn test_align_13() {
+        assert_eq!(TypeId::OBJECT.align_offset(13), 16);
+        assert_eq!(TypeId::OBJECT.align_size(13), 32);
+
+        assert_eq!(TypeId::INT.align_offset(13), 16);
+        assert_eq!(TypeId::INT.align_size(13), 24);
+
+        assert_eq!(TypeId::BOOL.align_offset(13), 13);
+        assert_eq!(TypeId::BOOL.align_size(13), 14);
+
+        assert_eq!(TypeId::STRING.align_offset(13), 16);
+        assert_eq!(TypeId::STRING.align_size(13), 32);
+
+        assert_eq!(TypeId::IO.align_offset(13), 16);
+        assert_eq!(TypeId::IO.align_size(13), 32);
     }
 }

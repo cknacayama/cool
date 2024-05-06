@@ -1,7 +1,9 @@
+use std::{fs, process};
+
 use cool::{checker::SemanticChecker, codegen::CodeGenerator, lexer::Lexer, parser::Parser};
 
 fn main() {
-    let input = std::fs::read_to_string("in/test.cl").unwrap();
+    let input = fs::read_to_string("in/test.cl").unwrap();
     let lexer = Lexer::new(&input);
 
     match SemanticChecker::new(Parser::new(lexer)).check() {
@@ -10,7 +12,17 @@ fn main() {
             for ast in asts {
                 codegen.gen_class(&ast);
             }
-            println!("{}", codegen.take_output());
+            let output = codegen.take_output();
+            fs::write("out/test.s", output).unwrap();
+            dbg!(process::Command::new("gcc-13")
+                .args(&["-nostdlib", "-static", "-o", "out/test", "out/test.s"])
+                .output()
+                .unwrap());
+            let objdump = process::Command::new("objdump")
+                .args(&["-M", "intel", "-d", "out/test"])
+                .output()
+                .unwrap();
+            fs::write("out/test.objdump", &objdump.stdout).unwrap();
         }
         Err(e) => {
             let (start, end) = e.span.location(&input);

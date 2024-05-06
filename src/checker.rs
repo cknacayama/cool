@@ -27,7 +27,6 @@ impl<'a> Default for Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new() -> Self {
-        dbg!(std::mem::size_of::<Checker>());
         Self {
             object_envs:     vec![],
             cur_stack_size:  0,
@@ -128,7 +127,8 @@ impl<'a> Checker<'a> {
         self.cur_init_size = 8;
 
         let mut vtable = parent_data.vtable().to_vec();
-        vtable[1].0 = id;
+        vtable[0].0 = id;
+        vtable[2].0 = id;
 
         let data = ClassTypeData::new(
             id,
@@ -216,15 +216,10 @@ impl<'a> Checker<'a> {
         self.insert_attribute(ty, id, attr_ty)
             .map_err(|kind| TypeError::new(kind, span))?;
 
-        self.cur_attr_offset = attr_ty.align_offset(self.cur_attr_offset);
+        let offset = attr_ty.align_offset(self.cur_attr_offset);
+        self.cur_attr_offset = offset + attr_ty.size_of();
 
-        Ok(TypedAttribute::new(
-            id,
-            attr_ty,
-            init,
-            self.cur_attr_offset,
-            span,
-        ))
+        Ok(TypedAttribute::new(id, attr_ty, init, offset, span))
     }
 
     fn check_method(
@@ -325,9 +320,10 @@ impl<'a> Checker<'a> {
             ExprKind::While(cond, loop_) => self.check_while_expr(*cond, *loop_, span),
             ExprKind::Let(bindings, expr) => self.check_let_expr(bindings, *expr, span),
             ExprKind::SelfDispatch(method, args) => self.check_self_dispatch(method, args, span),
-            ExprKind::Dispatch(expr, ty, method, args) => {
-                self.check_dispatch_expr(*expr, ty, method, args, span)
-            }
+            ExprKind::Dispatch(expr, ty, method, args) => match ty {
+                Some(ty) => self.check_static_dispatch_expr(*expr, ty, method, args, span),
+                None => self.check_dispatch_expr(*expr, method, args, span),
+            },
         }
     }
 
@@ -603,7 +599,55 @@ impl<'a> Checker<'a> {
     fn check_dispatch_expr(
         &mut self,
         expr: Expr<'a>,
-        ty: Option<Type<'a>>,
+        method: &'a str,
+        args: Box<[Expr<'a>]>,
+        span: Span,
+    ) -> TypeResult<'a, TypedExpr<'a>> {
+        let args = args
+            .into_vec()
+            .into_iter()
+            .map(|arg| self.check_expr(arg))
+            .collect::<TypeResult<Vec<_>>>()?;
+
+        let mut expr = self.check_expr(expr)?;
+        expr.ty = expr.ty.map_self_type(|| self.cur_class);
+        let method_ty = self
+            .get_method(expr.ty, method)
+            .map_err(|kind| TypeError::new(kind, span))?;
+
+        if args.len() != method_ty.params().len() {
+            return Err(TypeError::new(
+                TypeErrorKind::ExpectedArity {
+                    expected: method_ty.params().len(),
+                    found:    args.len(),
+                },
+                span,
+            ));
+        }
+
+        let args = args
+            .into_iter()
+            .zip(method_ty.params().iter().copied())
+            .map(|(arg, ty)| {
+                self.is_subtype(arg.ty, ty)
+                    .map_err(|kind| TypeError::new(kind, arg.span))
+                    .map(|_| arg)
+            })
+            .collect::<TypeResult<Box<_>>>()?;
+
+        let return_ty = method_ty.return_ty().map_self_type(|| expr.ty);
+
+        Ok(TypedExpr::new(
+            TypedExprKind::Dispatch(Box::new(expr), method, args),
+            span,
+            return_ty,
+        ))
+    }
+
+    fn check_static_dispatch_expr(
+        &mut self,
+        expr: Expr<'a>,
+        ty: Type<'a>,
         method: &'a str,
         args: Box<[Expr<'a>]>,
         span: Span,
@@ -615,13 +659,13 @@ impl<'a> Checker<'a> {
             .collect::<TypeResult<Vec<_>>>()?;
 
         let expr = self.check_expr(expr)?;
-        let ty = match ty {
-            Some(ty) => self
-                .get_type_or_err(&ty)
-                .and_then(|ty| self.is_subtype(expr.ty, ty).map(|_| ty))
-                .map_err(|kind| TypeError::new(kind, span))?,
-            None => expr.ty.map_self_type(|| self.cur_class),
-        };
+        let ty = self
+            .get_type_or_err(&ty)
+            .and_then(|ty| {
+                self.is_subtype(expr.ty, ty)
+                    .map(|_| ty.map_self_type(|| self.cur_class))
+            })
+            .map_err(|kind| TypeError::new(kind, span))?;
         let method_ty = self
             .get_method(ty, method)
             .map_err(|kind| TypeError::new(kind, span))?;
@@ -649,7 +693,7 @@ impl<'a> Checker<'a> {
         let return_ty = method_ty.return_ty().map_self_type(|| ty);
 
         Ok(TypedExpr::new(
-            TypedExprKind::Dispatch(Box::new(expr), ty, method, args),
+            TypedExprKind::StaticDispatch(Box::new(expr), ty, method, args),
             span,
             return_ty,
         ))
@@ -661,6 +705,8 @@ pub enum SemanticErrorKind<'a> {
     LexError(LexErrorKind),
     ParseError(ParseErrorKind),
     TypeError(TypeErrorKind<'a>),
+    NoMainClass,
+    NoMainMethod,
 }
 
 impl<'a> std::fmt::Display for SemanticErrorKind<'a> {
@@ -669,6 +715,8 @@ impl<'a> std::fmt::Display for SemanticErrorKind<'a> {
             SemanticErrorKind::LexError(kind) => write!(f, "{}", kind),
             SemanticErrorKind::ParseError(kind) => write!(f, "{}", kind),
             SemanticErrorKind::TypeError(kind) => write!(f, "{}", kind),
+            SemanticErrorKind::NoMainClass => write!(f, "No main class found"),
+            SemanticErrorKind::NoMainMethod => write!(f, "No main method found"),
         }
     }
 }
@@ -755,7 +803,21 @@ impl<'a> SemanticChecker<'a> {
 
     pub fn check(mut self) -> SemanticResult<'a, (Vec<TypedClass<'a>>, ClassEnv<'a>)> {
         let classes = (&mut self).collect::<SemanticResult<Vec<_>>>()?;
-        Ok((classes, self.checker.class_env))
+        let main_class = self
+            .checker
+            .class_env
+            .get_type(&Type::Class("Main"))
+            .ok_or(SemanticError::new(
+                SemanticErrorKind::NoMainClass,
+                Span::default(),
+            ))?;
+        match self.checker.get_method(main_class, "main") {
+            Ok(method) if method.params().is_empty() => Ok((classes, self.checker.class_env)),
+            _ => Err(SemanticError::new(
+                SemanticErrorKind::NoMainMethod,
+                Span::default(),
+            )),
+        }
     }
 }
 
