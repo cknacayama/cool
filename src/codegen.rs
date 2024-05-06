@@ -77,18 +77,6 @@ impl Reg {
             _ => None,
         }
     }
-
-    pub fn arg_reg(index: usize) -> Option<Self> {
-        match index {
-            0 => Some(Reg::Rdi),
-            1 => Some(Reg::Rsi),
-            2 => Some(Reg::Rdx),
-            3 => Some(Reg::Rcx),
-            4 => Some(Reg::R8),
-            5 => Some(Reg::R9),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for Reg {
@@ -101,7 +89,7 @@ impl std::fmt::Display for Reg {
 pub struct CodeGenerator<'a> {
     data_section:     String,
     text_section:     String,
-    locals:           Vec<HashMap<&'a str, (TypeId, usize)>>,
+    locals:           Vec<HashMap<&'a str, (TypeId, isize)>>,
     class_env:        ClassEnv<'a>,
     cur_class:        TypeId,
     cur_stack_offset: usize,
@@ -217,11 +205,11 @@ impl<'a> CodeGenerator<'a> {
         self.locals.pop();
     }
 
-    fn insert_local(&mut self, id: &'a str, ty: TypeId, offset: usize) {
+    fn insert_local(&mut self, id: &'a str, ty: TypeId, offset: isize) {
         self.locals.last_mut().unwrap().insert(id, (ty, offset));
     }
 
-    fn get_local(&self, id: &'a str) -> Option<(TypeId, usize)> {
+    fn get_local(&self, id: &'a str) -> Option<(TypeId, isize)> {
         for scope in self.locals.iter().rev() {
             if let Some(local) = scope.get(id) {
                 return Some(*local);
@@ -254,6 +242,7 @@ impl<'a> CodeGenerator<'a> {
 {id}_type_name:
     mov     rax, QWORD PTR [rip + {id}_Typenamelen]
     lea     rdx, QWORD PTR [rip + {id}_Typename]
+    add     rsp, 16
     ret
 "
         ));
@@ -298,16 +287,15 @@ impl<'a> CodeGenerator<'a> {
     mov     rbp, rsp
 
     sub     rsp, {size}
-
-    mov     QWORD PTR [rbp - 8], rdi
-    mov     QWORD PTR [rbp - 16], rsi
 ",
             class_id = class.id(),
             method_name = method.id(),
         ));
 
         self.begin_scope();
-        self.cur_stack_offset = 16;
+        self.cur_stack_offset = 0;
+
+        self.insert_local("self", self.cur_class, 16);
 
         let mut i = 2;
         for param in method.params() {
@@ -346,38 +334,11 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn gen_param(&mut self, i: usize, param: &TypedFormal<'a>) -> usize {
-        let offset = param.ty.align_offset(self.cur_stack_offset);
-        self.cur_stack_offset = offset + param.ty.size_of();
-        self.insert_local(param.id, param.ty, offset);
+        let offset = i * 8 + 16;
+        self.insert_local(param.id, param.ty, offset as isize);
         match param.ty {
-            TypeId::INT => {
-                self.push_text(&format!(
-                    r"    mov     QWORD PTR [rbp - {offset}], {reg}
-",
-                    reg = Reg::arg_reg(i).unwrap()
-                ));
-                i + 1
-            }
-            TypeId::BOOL => {
-                self.push_text(&format!(
-                    r"    mov     BYTE PTR [rbp - {offset}], {reg}
-",
-                    reg = Reg::arg_reg(i).unwrap().to_byte_string()
-                ));
-                i + 1
-            }
-            _ => {
-                self.push_text(&format!(
-                    r"    mov     QWORD PTR [rbp - {offset1}], {r1}
-    mov     QWORD PTR [rbp - {offset2}], {r2}
-",
-                    r1 = Reg::arg_reg(i).unwrap(),
-                    r2 = Reg::arg_reg(i + 1).unwrap(),
-                    offset1 = offset,
-                    offset2 = offset + 8
-                ));
-                i + 2
-            }
+            TypeId::INT | TypeId::BOOL => i + 1,
+            _ => i + 2,
         }
     }
 
@@ -388,23 +349,20 @@ impl<'a> CodeGenerator<'a> {
 {id}_New:
     push    rbp
     mov     rbp, rsp
-
     sub     rsp, {stack_size}
-
-    cmp     rdi, 0
-
+    cmp     QWORD PTR [rbp + 16], 0
     jne     .{id}_New_L1
-
-    mov     rdi, {attrs_size}
+    push    {attrs_size}
     call    allocator_alloc
-    mov     QWORD PTR [rbp - 8], rax
-
+    add     rsp, 8
     jmp     .{id}_New_L2
 .{id}_New_L1:
-    mov     QWORD PTR [rbp - 8], rdi
+    mov     rax, QWORD PTR [rbp + 16]
 .{id}_New_L2:
-    mov     rdi, QWORD PTR [rbp - 8]
+    push    rax
     call    {parent_id}_New
+    add     rsp, 8
+    mov     QWORD PTR [rbp - 8], rax
 ",
             id = class.id,
             stack_size = class.init_size,
@@ -447,8 +405,9 @@ impl<'a> CodeGenerator<'a> {
                 (TypeId::INT, r1, _) => {
                     let r2 = self.alloc_reg_no_ret().unwrap();
                     self.text_section.push_str(&format!(
-                        r"    mov     rdi, {r1}
+                        r"    push    {r1}
     call    Int_To_Object
+    add     rsp, 8
 
     mov     {r2}, QWORD PTR [rbp - 8]
     mov     QWORD PTR [{r2} + {offset1}], rax
@@ -477,6 +436,7 @@ impl<'a> CodeGenerator<'a> {
                     self.text_section.push_str(&format!(
                         r"    mov     rdi, {r1}
     call    Bool_To_Object
+    add     rsp, 8
 
     mov     {r2}, QWORD PTR [rbp - 8]
     mov     QWORD PTR [{r2} + {offset1}], rax
@@ -505,9 +465,10 @@ impl<'a> CodeGenerator<'a> {
                 (TypeId::STRING, r1, Some(r2)) => {
                     let r3 = self.alloc_reg_no_ret().unwrap();
                     self.text_section.push_str(&format!(
-                        r"    mov     rdi, {r1}
-    mov     rsi, {r2}
+                        r"    push    {r2}
+    push    {r1}
     call    String_To_Object
+    add     rsp, 16
 
     mov     {r3}, QWORD PTR [rbp - 8]
     mov     QWORD PTR [{r3} + {offset1}], rax
@@ -563,8 +524,9 @@ impl<'a> CodeGenerator<'a> {
             TypeId::STRING => {
                 let r = self.alloc_reg_no_ret().unwrap();
                 self.text_section.push_str(&format!(
-                    r"    call    String_New
-
+                    r"    push    0
+    call    String_New
+    add     rsp, 8
     mov     {r}, QWORD PTR [rbp - 8]
     mov     QWORD PTR [{r} + {offset1}], rax
     mov     QWORD PTR [{r} + {offset2}], rdx
@@ -611,7 +573,8 @@ impl<'a> CodeGenerator<'a> {
     .string {s:?}
     .align 8
 _string_{label}_len:
-    .quad {len}",
+    .quad {len}
+",
                     label = self.cur_str_label,
                     len = s.len(),
                 ));
@@ -636,7 +599,9 @@ _string_{label}_len:
 
     fn gen_new_expr(&mut self, ty: TypeId) -> (TypeId, Reg, Option<Reg>) {
         let id = self.class_env.get_class(ty).unwrap().id();
-        self.push_text(&format!("    mov     rdi, 0\n    call    {id}_New\n"));
+        self.push_text(&format!(
+            "    push    0\n    call    {id}_New\n    add     rsp, 8\n"
+        ));
         self.reserve_reg(Reg::Rax);
         match ty {
             TypeId::INT | TypeId::BOOL => (ty, Reg::Rax, None),
@@ -653,23 +618,20 @@ _string_{label}_len:
         args: &[TypedExpr<'a>],
         ret_ty: TypeId,
     ) -> (TypeId, Reg, Option<Reg>) {
-        let mut i = 2;
-        self.push_text(&format!(
-            r"    mov     rdi, QWORD PTR [rbp - 8]
-    mov     rsi, QWORD PTR [rbp - 16]
-"
-        ));
-        self.reserve_reg(Reg::Rdi);
-        self.reserve_reg(Reg::Rsi);
-        for arg in args {
-            i = self.gen_arg(i, arg);
+        let mut size = 16;
+        for arg in args.iter().rev() {
+            size = self.gen_arg(arg, size);
         }
         let class = self.class_env.get_class(self.cur_class).unwrap();
         let method_offset = class.get_vtable_offset(method).unwrap() * 8;
         let r = self.alloc_reg().unwrap();
         self.push_text(&format!(
-            r"    mov     {r}, QWORD PTR [rsi + {method_offset}]
+            r"    push    QWORD PTR [rbp + 24]
+    push    QWORD PTR [rbp + 16]
+    mov     {r}, QWORD PTR [rbp + 24]
+    mov     {r}, QWORD PTR [{r} + {method_offset}]
     call    {r}
+    add     rsp, {size}
 "
         ));
         self.free_all_regs();
@@ -693,32 +655,32 @@ _string_{label}_len:
         args: &[TypedExpr<'a>],
         ret_ty: TypeId,
     ) -> (TypeId, Reg, Option<Reg>) {
-        let (_, r1, r2) = self.gen_expr(e);
-        let mut i = match e.ty {
-            TypeId::INT => return self.gen_dispatch_int(r1, method, args, ret_ty),
-            TypeId::BOOL => return self.gen_dispatch_bool(r1, method, args, ret_ty),
-            TypeId::STRING => {
-                return self.gen_dispatch_string(r1, r2.unwrap(), method, args, ret_ty)
-            }
-            _ => 2,
-        };
-        let r2 = r2.unwrap();
-        mov_regs!(r1 => Reg::Rdi, r2 => Reg::Rsi, self);
-        self.free_reg(r1);
-        self.free_reg(r2);
-        self.reserve_reg(Reg::Rdi);
-        self.reserve_reg(Reg::Rsi);
-        for arg in args {
-            i = self.gen_arg(i, arg);
+        let mut size = 0;
+        for arg in args.iter().rev() {
+            size = self.gen_arg(arg, size);
+        }
+        match e.ty {
+            TypeId::INT => return self.gen_dispatch_int(e, method, ret_ty, size),
+            TypeId::BOOL => return self.gen_dispatch_bool(e, method, ret_ty, size),
+            TypeId::STRING => return self.gen_dispatch_string(e, method, ret_ty, size),
+            _ => {}
         }
         let class = self.class_env.get_class(e.ty).unwrap();
         let method_offset = class.get_vtable_offset(method).unwrap() * 8;
+        let (_, r1, r2) = self.gen_expr(e);
+        let r2 = r2.unwrap();
         let r = self.alloc_reg().unwrap();
+        size += 16;
         self.push_text(&format!(
-            r"    mov     {r}, QWORD PTR [rsi + {method_offset}]
+            r"    push    {r2}
+    push    {r1}
+    mov     {r}, QWORD PTR [{r2} + {method_offset}]
     call    {r}
+    add     rsp, {size}
 "
         ));
+        self.free_reg(r1);
+        self.free_reg(r2);
         self.free_all_regs();
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
@@ -735,38 +697,35 @@ _string_{label}_len:
 
     fn gen_dispatch_string(
         &mut self,
-        r1: Reg,
-        r2: Reg,
+        e: &TypedExpr<'a>,
         method: &'a str,
-        args: &[TypedExpr<'a>],
         ret_ty: TypeId,
+        mut size: usize,
     ) -> (TypeId, Reg, Option<Reg>) {
-        mov_regs!(r1 => Reg::Rdi, r2 => Reg::Rsi, self);
+        let (_, r1, r2) = self.gen_expr(e);
+        let r2 = r2.unwrap();
+        self.push_text(&format!("    push    {r2}\n    push    {r1}\n"));
         self.free_reg(r1);
         self.free_reg(r2);
-        self.reserve_reg(Reg::Rdi);
-        self.reserve_reg(Reg::Rsi);
         let method_class = self
             .class_env
             .get_class(TypeId::STRING)
             .unwrap()
             .get_vtable_entry(method)
             .unwrap();
-        let call = format!("{}_{}", method_class, method);
+        let call = format!("    call {}_{}\n", method_class, method);
+        size += 16;
         if method_class != "String" {
             self.push_text(&format!(
                 r"    call    String_To_Object
-    mov     rdi, rax
-    mov     rsi, rdx
+    add     rsp, 16
+    push    rdx
+    push    rax
 "
             ));
         }
-        let mut i = 2;
-        for arg in args {
-            i = self.gen_arg(i, arg);
-        }
         self.push_text(&call);
-        self.free_all_regs();
+        self.push_text(&format!("    add     rsp, {}\n", size));
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
                 self.reserve_reg(Reg::Rax);
@@ -782,38 +741,34 @@ _string_{label}_len:
 
     fn gen_dispatch_int(
         &mut self,
-        r: Reg,
+        e: &TypedExpr<'a>,
         method: &'a str,
-        args: &[TypedExpr<'a>],
         ret_ty: TypeId,
+        mut size: usize,
     ) -> (TypeId, Reg, Option<Reg>) {
-        self.push_text(&format!("    mov     rdi, {r}\n"));
+        let (_, r, _) = self.gen_expr(e);
+        self.push_text(&format!("    push    {r}\n"));
         self.free_reg(r);
-        self.reserve_reg(Reg::Rdi);
         let method_class = self
             .class_env
             .get_class(TypeId::INT)
             .unwrap()
             .get_vtable_entry(method)
             .unwrap();
-        let call = format!("{}_{}", method_class, method);
-        let mut i = if method_class != "Int" {
+        let call = format!("    call {}_{}\n", method_class, method);
+        size += 8;
+        if method_class != "Int" {
             self.push_text(&format!(
                 r"    call    Int_To_Object
-    mov     rdi, rax
-    mov     rsi, rdx
+    add     rsp, 8
+    push    rdx
+    push    rax
 "
             ));
-            self.reserve_reg(Reg::Rsi);
-            2
-        } else {
-            1
-        };
-        for arg in args {
-            i = self.gen_arg(i, arg);
+            size += 8;
         }
         self.push_text(&call);
-        self.free_all_regs();
+        self.push_text(&format!("    add     rsp, {}\n", size));
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
                 self.reserve_reg(Reg::Rax);
@@ -829,38 +784,34 @@ _string_{label}_len:
 
     fn gen_dispatch_bool(
         &mut self,
-        r: Reg,
+        e: &TypedExpr<'a>,
         method: &'a str,
-        args: &[TypedExpr<'a>],
         ret_ty: TypeId,
+        mut size: usize,
     ) -> (TypeId, Reg, Option<Reg>) {
-        self.push_text(&format!("    mov     rdi, {r}\n"));
+        let (_, r, _) = self.gen_expr(e);
+        self.push_text(&format!("    push    {r}\n"));
         self.free_reg(r);
-        self.reserve_reg(Reg::Rdi);
         let method_class = self
             .class_env
             .get_class(TypeId::BOOL)
             .unwrap()
             .get_vtable_entry(method)
             .unwrap();
-        let call = format!("{}_{}", method_class, method);
-        let mut i = if method_class != "Int" {
+        let call = format!("    call {}_{}\n", method_class, method);
+        size += 8;
+        if method_class != "Bool" {
             self.push_text(&format!(
                 r"    call    Bool_To_Object
-    mov     rdi, rax
-    mov     rsi, rdx
+    add     rsp, 8
+    push    rdx
+    push    rax
 "
             ));
-            self.reserve_reg(Reg::Rsi);
-            2
-        } else {
-            1
-        };
-        for arg in args {
-            i = self.gen_arg(i, arg);
+            size += 8;
         }
         self.push_text(&call);
-        self.free_all_regs();
+        self.push_text(&format!("    add     rsp, {}\n", size));
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
                 self.reserve_reg(Reg::Rax);
@@ -874,28 +825,20 @@ _string_{label}_len:
         }
     }
 
-    fn gen_arg(&mut self, i: usize, arg: &TypedExpr<'a>) -> usize {
-        if i >= 6 {
-            todo!("Implement stack arguments");
-        }
+    fn gen_arg(&mut self, arg: &TypedExpr<'a>, size: usize) -> usize {
         let (ty, r1, r2) = self.gen_expr(arg);
-        let arg1 = Reg::arg_reg(i).unwrap();
         match ty {
             TypeId::INT | TypeId::BOOL => {
-                self.push_text(&format!("    mov     {arg1}, {r1}\n",));
+                self.push_text(&format!("    push    {r1}\n"));
                 self.free_reg(r1);
-                self.reserve_reg(arg1);
-                i + 1
+                size + 8
             }
             _ => {
                 let r2 = r2.unwrap();
-                let arg2 = Reg::arg_reg(i + 1).unwrap();
-                mov_regs!(r1 => arg1, r2 => arg2, self);
+                self.push_text(&format!("    push    {r2}\n    push    {r1}\n"));
                 self.free_reg(r1);
                 self.free_reg(r2);
-                self.reserve_reg(arg1);
-                self.reserve_reg(arg2);
-                i + 2
+                size + 16
             }
         }
     }
@@ -1021,36 +964,7 @@ _string_{label}_len:
                 (TypeId::BOOL, r1, None)
             }
             TypeId::STRING => {
-                let r2 = r2.unwrap();
-                let r4 = r4.unwrap();
-                self.push_text(&format!(
-                    r"    cmp     {r1}, {r3}
-    jne     .L{label}
-    sub     rsp, 24
-    mov     QWORD PTR [rsp], {r1}
-    mov     QWORD PTR [rsp + 8], {r2}
-    mov     QWORD PTR [rsp + 16], {r4}
-    mov     rdi, QWORD PTR [rsp + 8]
-    mov     rsi, QWORD PTR [rsp + 16]
-    mov     rdx, QWORD PTR [rsp]
-    call    String_Equal
-    add     rsp, 24
-    cmp     rax, 0
-    sete    {r1_to_byte}
-    jmp     .L{label_end}
-.L{label}:
-    mov     {r1}, 0
-.L{label_end}:
-",
-                    label = self.cur_label,
-                    label_end = self.cur_label + 1,
-                    r1_to_byte = r1.to_byte_string()
-                ));
-                self.cur_label += 2;
-                self.free_reg(r2);
-                self.free_reg(r3);
-                self.free_reg(r4);
-                (TypeId::BOOL, r1, None)
+                todo!()
             }
             _ => {
                 let r2 = r2.unwrap();

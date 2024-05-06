@@ -247,7 +247,7 @@ impl<'a> Checker<'a> {
             .map_err(|kind| TypeError::new(kind, span))?;
         self.begin_scope();
 
-        self.cur_stack_size = self.cur_class.size_of();
+        self.cur_stack_size = 0;
 
         let iter = params.into_vec().into_iter();
         let params = iter
@@ -256,7 +256,6 @@ impl<'a> Checker<'a> {
                     .get_type_or_err(&param.ty)
                     .map_err(|kind| TypeError::new(kind, param.span))?;
                 self.insert_object(param.id, ty);
-                self.cur_stack_size = ty.align_size(self.cur_stack_size);
                 Ok(TypedFormal::new(param.id, ty, param.span))
             })
             .collect::<TypeResult<Box<_>>>()?;
