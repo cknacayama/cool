@@ -229,9 +229,8 @@ IO_out_int:
 
     mov     rdi, QWORD PTR [rbp + 32] # n
     lea     r10, BYTE PTR [rip + _io_out_int_buf] # buf
-    mov     BYTE PTR [r10 + 20], 10 # '\n'
-    mov     r8, 1 # len
-    mov     r9, 19
+    mov     r8, 0 # len
+    mov     r9, 20
     mov     rcx, 10
     mov     rsi, rdi
     shr     rdi, 63 # check if n < 0
@@ -245,8 +244,8 @@ IO_out_int:
     # quotient in rax, remainder in rdx
     add     rdx, 48 # n % 10 + '0'
     mov     BYTE PTR [r10 + r9], dl
-    inc     r8
-    dec     r9
+    add     r8, 1
+    sub     r9, 1
     mov     rsi, rax
     cmp     rsi, 0
     jne     .IO_out_int_L1
@@ -254,7 +253,7 @@ IO_out_int:
     cmp     dil, 0
     je      .IO_out_int_L2
     mov     BYTE PTR [r10 + r9], 45 # '-'
-    inc     r8
+    add     r8, 1
 .IO_out_int_L2:
     mov     rax, 1
     mov     rdi, 1
@@ -328,9 +327,28 @@ memory_copy:
     jae     .memory_copy_L2
     movzx   ecx, BYTE PTR [rsi + rax]
     mov     BYTE PTR [rdi + rax], cl
-    inc     rax
+    add     rax, 1
     jmp     .memory_copy_L1
 .memory_copy_L2:
     mov     rax, rdi
     ret
-
+    
+    .globl memory_compare
+#   Bool memory_compare(const void* ptr1, const void* ptr2, size_t size)
+memory_compare:
+    mov     rdi, QWORD PTR [rsp + 8] # ptr1
+    mov     rsi, QWORD PTR [rsp + 16] # ptr2
+    mov     rax, 0 # i = 0
+#   for (size_t i = 0; i < size; i++)
+.memory_compare_L1:
+    cmp     rax, QWORD PTR [rsp + 24] # size
+    jae     .memory_compare_L2
+    add     rax, 1
+    movzx   ecx, BYTE PTR [rdi + rax - 1]
+    cmp     cl, BYTE PTR [rsi + rax - 1]
+    je     .memory_compare_L1
+    mov     rax, 0
+    ret
+.memory_compare_L2:
+    mov     rax, 1
+    ret

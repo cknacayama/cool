@@ -1,18 +1,10 @@
 use std::{fs, process};
 
-use cool::{checker::SemanticChecker, codegen::CodeGenerator, lexer::Lexer, parser::Parser};
-
 fn main() {
     let input = fs::read_to_string("in/test.cl").unwrap();
-    let lexer = Lexer::new(&input);
 
-    match SemanticChecker::new(Parser::new(lexer)).check() {
-        Ok((asts, env)) => {
-            let mut codegen = CodeGenerator::new(env);
-            for ast in asts {
-                codegen.gen_class(&ast);
-            }
-            let output = codegen.take_output();
+    match cool::compile(&input) {
+        Ok(output) => {
             fs::write("out/test.s", output).unwrap();
             let gcc = process::Command::new("gcc-13")
                 .args(["-nostdlib", "-static", "-o", "out/test", "out/test.s"])

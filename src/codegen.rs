@@ -33,6 +33,20 @@ impl Reg {
         }
     }
 
+    pub fn to_dword_string(&self) -> &'static str {
+        match self {
+            Reg::Rax => "eax",
+            Reg::Rcx => "ecx",
+            Reg::Rdx => "edx",
+            Reg::Rsi => "esi",
+            Reg::Rdi => "edi",
+            Reg::R8 => "r8d",
+            Reg::R9 => "r9d",
+            Reg::R10 => "r10d",
+            Reg::R11 => "r11d",
+        }
+    }
+
     pub fn to_byte_string(&self) -> &'static str {
         match self {
             Reg::Rax => "al",
@@ -88,6 +102,7 @@ pub struct CodeGenerator<'a> {
     data_section:     String,
     text_section:     String,
     locals:           Vec<HashMap<&'a str, (TypeId, isize)>>,
+    attrs:            HashMap<&'a str, (TypeId, usize)>,
     class_env:        ClassEnv<'a>,
     cur_class:        TypeId,
     cur_stack_offset: usize,
@@ -118,11 +133,8 @@ macro_rules! mov_regs {
 "
             ));
         } else {
-            $_self.push_text(&format!(
-                r"    mov     {r22}, {r2}
-    mov     {r11}, {r1}
-"
-            ));
+            $_self.gen_mov(r22, r2);
+            $_self.gen_mov(r11, r1);
         }
     };
 }
@@ -131,6 +143,7 @@ impl<'a> CodeGenerator<'a> {
     pub fn new(class_env: ClassEnv<'a>) -> Self {
         Self {
             locals: Vec::new(),
+            attrs: HashMap::new(),
             class_env,
             cur_class: TypeId::SelfType,
             cur_stack_offset: 0,
@@ -207,6 +220,10 @@ impl<'a> CodeGenerator<'a> {
         self.locals.last_mut().unwrap().insert(id, (ty, offset));
     }
 
+    fn insert_attr(&mut self, id: &'a str, ty: TypeId, offset: usize) {
+        self.attrs.insert(id, (ty, offset));
+    }
+
     fn get_local(&self, id: &'a str) -> Option<(TypeId, isize)> {
         for scope in self.locals.iter().rev() {
             if let Some(local) = scope.get(id) {
@@ -224,7 +241,25 @@ impl<'a> CodeGenerator<'a> {
         self.text_section.push_str(text);
     }
 
-    fn push_type_name(&mut self, id: &'a str) {
+    fn gen_mov(&mut self, dst: Reg, src: Reg) {
+        if dst != src {
+            self.push_text(&format!("    mov     {dst}, {src}\n"));
+        }
+    }
+
+    fn gen_rsp_add(&mut self, size: usize) {
+        if size != 0 {
+            self.push_text(&format!("    add     rsp, {}\n", size));
+        }
+    }
+
+    fn gen_rsp_sub(&mut self, size: usize) {
+        if size != 0 {
+            self.push_text(&format!("    sub     rsp, {}\n", size));
+        }
+    }
+
+    fn gen_type_name(&mut self, id: &'a str) {
         let len = id.len();
         self.push_data(&format!(
             r#"
@@ -246,7 +281,7 @@ impl<'a> CodeGenerator<'a> {
         ));
     }
 
-    fn push_vtable(&mut self) {
+    fn gen_vtable(&mut self) {
         let class = self.class_env.get_class(self.cur_class).unwrap();
         let id = class.id();
         let vtable = class.vtable();
@@ -260,8 +295,8 @@ impl<'a> CodeGenerator<'a> {
     pub fn gen_class(&mut self, class: &TypedClass<'a>) {
         self.cur_class = class.type_id;
 
-        self.push_type_name(class.id);
-        self.push_vtable();
+        self.gen_type_name(class.id);
+        self.gen_vtable();
 
         let data = self.class_env.get_class(class.type_id).unwrap();
         let parent_data = self.class_env.get_class(class.parent).unwrap();
@@ -271,6 +306,9 @@ impl<'a> CodeGenerator<'a> {
         for method in class.methods.iter() {
             self.gen_method(method)
         }
+
+        self.free_all_regs();
+        self.attrs.clear();
     }
 
     fn gen_method(&mut self, method: &TypedMethod<'a>) {
@@ -284,12 +322,11 @@ impl<'a> CodeGenerator<'a> {
 {class_id}_{method_name}:
     push    rbp
     mov     rbp, rsp
-
-    sub     rsp, {size}
 ",
             class_id = class.id(),
             method_name = method.id(),
         ));
+        self.gen_rsp_sub(size);
 
         self.begin_scope();
         self.cur_stack_offset = 0;
@@ -309,7 +346,7 @@ impl<'a> CodeGenerator<'a> {
     fn gen_ret(&mut self, r1: Reg, r2: Option<Reg>, size: usize) {
         match (r1, r2) {
             (_, None) => {
-                self.push_text(&format!("    mov     rax, {r1}\n"));
+                self.gen_mov(Reg::Rax, r1);
             }
             _ => {
                 let r2 = r2.unwrap();
@@ -317,12 +354,13 @@ impl<'a> CodeGenerator<'a> {
             }
         }
 
-        self.push_text(&format!(
-            r"    add     rsp, {size}
+        self.gen_rsp_add(size);
+        self.push_text(
+            r"
     pop     rbp
     ret
-"
-        ));
+",
+        );
 
         self.end_scope();
 
@@ -389,6 +427,7 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn gen_attr(&mut self, attr: &TypedAttribute<'a>) {
+        self.insert_attr(attr.id(), attr.ty(), attr.offset());
         match attr.init() {
             Some(ast) => match self.gen_expr(ast) {
                 (TypeId::INT, r1, _) if attr.ty().is_int() => {
@@ -434,7 +473,7 @@ impl<'a> CodeGenerator<'a> {
                 (TypeId::BOOL, r1, _) => {
                     let r2 = self.alloc_reg_no_ret().unwrap();
                     self.text_section.push_str(&format!(
-                        r"    mov     rdi, {r1}
+                        r"    push    {r1}
     call    Bool_To_Object
     add     rsp, 8
 
@@ -497,11 +536,11 @@ impl<'a> CodeGenerator<'a> {
                 }
                 _ => unreachable!(),
             },
-            None => self.gen_default_init(attr.ty(), attr.offset()),
+            None => self.gen_attr_default(attr.ty(), attr.offset()),
         }
     }
 
-    fn gen_default_init(&mut self, ty: TypeId, offset: usize) {
+    fn gen_attr_default(&mut self, ty: TypeId, offset: usize) {
         match ty {
             TypeId::INT => {
                 let r = self.alloc_reg().unwrap();
@@ -603,10 +642,210 @@ _string_{label}_len:
             TEK::Binary(op, lhs, rhs) => self.gen_binary(*op, lhs, rhs),
             TEK::Dispatch(e, method, args) => self.gen_dispatch(e, method, args, type_id),
             TEK::SelfDispatch(method, args) => self.gen_dispatch_self(method, args, type_id),
+            TEK::StaticDispatch(e, e_ty, method, args) => {
+                self.gen_static_dispatch(e, *e_ty, method, args, type_id)
+            }
             TEK::New(ty) => self.gen_new_expr(*ty),
             TEK::Block(exprs) => self.gen_block(exprs),
             TEK::If(cond, then_expr, else_expr) => self.gen_if(type_id, cond, then_expr, else_expr),
+            TEK::Assign(id, e) => self.gen_assign(id, e),
+            TEK::Let(binds, expr) => self.gen_let(binds, expr),
+            TEK::While(cond, body) => self.gen_while(cond, body),
             _ => todo!(),
+        }
+    }
+
+    fn gen_while(
+        &mut self,
+        cond: &TypedExpr<'a>,
+        body: &TypedExpr<'a>,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        let label1 = self.cur_label;
+        let label2 = self.cur_label + 1;
+        self.cur_label += 2;
+        self.push_text(&format!(".L{label1}:\n",));
+        let (_, r1, _) = self.gen_expr(cond);
+        self.push_text(&format!(
+            "    test    {r1}, {r1}\n    je      .L{label2}\n",
+            r1 = r1.to_byte_string(),
+        ));
+        self.free_reg(r1);
+        let (_, r1, r2) = self.gen_expr(body);
+        let r2 = r2.unwrap_or_else(|| self.alloc_reg().unwrap());
+        self.push_text(&format!(
+            r"    jmp     .L{label1}
+.L{label2}:
+    xor     {r1}, {r1}
+    xor     {r2}, {r2}
+",
+        ));
+        (TypeId::OBJECT, r1, Some(r2))
+    }
+
+    fn gen_let(
+        &mut self,
+        binds: &[(TypedFormal<'a>, Option<TypedExpr<'a>>)],
+        expr: &TypedExpr<'a>,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        self.begin_scope();
+        for (formal, e) in binds {
+            self.gen_bind(formal, e.as_ref());
+        }
+        let (ty, r1, r2) = self.gen_expr(expr);
+        self.end_scope();
+        (ty, r1, r2)
+    }
+
+    fn gen_bind(&mut self, formal: &TypedFormal<'a>, e: Option<&TypedExpr<'a>>) {
+        let offset = formal.ty.align_offset(self.cur_stack_offset);
+        self.cur_stack_offset = offset + formal.ty.size_of();
+        let offset = -(offset as isize);
+        self.insert_local(formal.id, formal.ty, offset);
+        match e {
+            Some(e) => {
+                let (_, r1, r2) = self.gen_assign(formal.id, e);
+                self.free_reg(r1);
+                if let Some(r2) = r2 {
+                    self.free_reg(r2);
+                }
+            }
+            None => {
+                self.gen_local_default(formal, offset);
+            }
+        }
+    }
+
+    fn gen_local_default(&mut self, formal: &TypedFormal<'a>, offset: isize) {
+        match formal.ty {
+            TypeId::INT => {
+                let (addr, _) = self.gen_stack_access(8, offset);
+                self.push_text(&format!("    mov     {addr}, 0\n"));
+            }
+            TypeId::BOOL => {
+                let (addr, _) = self.gen_stack_access(1, offset);
+                self.push_text(&format!("    mov     {addr}, 0\n"));
+            }
+            TypeId::STRING => {
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    r"    push    0
+    call    String_New
+    add     rsp, 8
+    mov     {addr1}, rax
+    mov     {addr2}, rdx
+",
+                ));
+            }
+            _ => {
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!("    mov     {addr1}, 0\n    mov     {addr2}, 0\n"));
+            }
+        }
+    }
+
+    fn gen_stack_access(&mut self, size: usize, offset: isize) -> (String, Option<String>) {
+        match (size, offset) {
+            (1, ..0) => (format!("BYTE PTR [rbp - {}]", -offset), None),
+            (8, ..0) => (format!("QWORD PTR [rbp - {}]", -offset), None),
+            (16, ..0) => {
+                let offset = -offset;
+                (
+                    format!("QWORD PTR [rbp - {}]", offset),
+                    Some(format!("QWORD PTR [rbp - {}]", offset + 8)),
+                )
+            }
+            (1, _) => (format!("BYTE PTR [rbp + {}]", offset), None),
+            (8, _) => (format!("QWORD PTR [rbp + {}]", offset), None),
+            (16, _) => (
+                format!("QWORD PTR [rbp + {}]", offset),
+                Some(format!("QWORD PTR [rbp + {}]", offset + 8)),
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    fn gen_assign(&mut self, id: &'a str, e: &TypedExpr<'a>) -> (TypeId, Reg, Option<Reg>) {
+        let Some((ty, offset)) = self.get_local(id) else {
+            return self.gen_attr_store(id, e);
+        };
+        let (ty_expr, r1, r2) = self.gen_expr(e);
+        match ty_expr {
+            TypeId::INT if ty.is_int() => {
+                let (addr, _) = self.gen_stack_access(8, offset);
+                self.push_text(&format!("    mov     {addr}, {r1}\n"));
+                (TypeId::INT, r1, None)
+            }
+            TypeId::BOOL if ty.is_bool() => {
+                let (addr, _) = self.gen_stack_access(1, offset);
+                self.push_text(&format!(
+                    "    mov     {addr}, {r1}\n",
+                    r1 = r1.to_byte_string()
+                ));
+                (TypeId::BOOL, r1, None)
+            }
+            TypeId::INT => {
+                self.push_text(&format!(
+                    r"    push    {r1}
+    call    Int_To_Object
+    add     rsp, 8
+"
+                ));
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    "    mov     {addr1}, rax\n    mov     {addr2}, rdx\n"
+                ));
+                let r3 = self.alloc_reg().unwrap();
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r3, Reg::Rdx);
+                (TypeId::INT, r1, Some(r3))
+            }
+            TypeId::BOOL => {
+                self.push_text(&format!(
+                    r"    push    {r1}
+    call    Bool_To_Object
+    add     rsp, 8
+"
+                ));
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    "    mov     {addr1}, rax\n    mov     {addr2}, rdx\n"
+                ));
+                let r3 = self.alloc_reg().unwrap();
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r3, Reg::Rdx);
+                (ty, r1, Some(r3))
+            }
+            TypeId::STRING if !ty.is_string() => {
+                let r2 = r2.unwrap();
+                self.push_text(&format!(
+                    r"    push    {r2}
+    push    {r1}
+    call    String_To_Object
+    add     rsp, 16
+"
+                ));
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    "    mov     {addr1}, rax\n    mov     {addr2}, rdx\n"
+                ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r2, Reg::Rdx);
+                (ty, r1, Some(r2))
+            }
+            _ => {
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    "    mov     {addr1}, {r1}\n    mov     {addr2}, {r2}\n",
+                    r2 = r2.unwrap()
+                ));
+                (ty, r1, r2)
+            }
         }
     }
 
@@ -622,18 +861,18 @@ _string_{label}_len:
         let label2 = self.cur_label + 1;
         self.cur_label += 2;
         self.push_text(&format!(
-            "    cmp     {r1}, 0\n    je      .L{label1}\n",
+            "    test    {r1}, {r1}\n    je      .L{label1}\n",
             r1 = r1.to_byte_string(),
         ));
         self.free_reg(r1);
         let (_, r1, r2) = self.gen_branch(ty, then_expr);
         self.push_text(&format!("    jmp     .L{label2}\n.L{label1}:\n",));
         let (_, r3, r4) = self.gen_branch(ty, else_expr);
-        self.push_text(&format!("    mov     {r1}, {r3}\n"));
+        self.gen_mov(r1, r3);
         self.free_reg(r3);
         if let Some(r2) = r2 {
             let r4 = r4.unwrap();
-            self.push_text(&format!("    mov     {r2}, {r4}\n"));
+            self.gen_mov(r2, r4);
             self.free_reg(r4);
         }
         self.push_text(&format!(".L{label2}:\n",));
@@ -649,10 +888,10 @@ _string_{label}_len:
                     r"    push    {r1}
     call    Int_To_Object
     add     rsp, 8
-    mov     {r1}, rax
-    mov     {r3}, rdx
 "
                 ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r3, Reg::Rdx);
                 r2 = Some(r3);
             }
             TypeId::BOOL if !ty.is_bool() => {
@@ -661,10 +900,10 @@ _string_{label}_len:
                     r"    push    {r1}
     call    Bool_To_Object
     add     rsp, 8
-    mov     {r1}, rax
-    mov     {r3}, rdx
 "
                 ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r3, Reg::Rdx);
                 r2 = Some(r3);
             }
             TypeId::STRING if !ty.is_string() => {
@@ -678,54 +917,185 @@ _string_{label}_len:
     mov     {r2}, rdx
 "
                 ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r2, Reg::Rdx);
             }
             _ => {}
         }
         (ty_branch, r1, r2)
     }
 
-    fn gen_id(&mut self, id: &'a str) -> (TypeId, Reg, Option<Reg>) {
-        let (ty, offset) = self.get_local(id).unwrap();
+    fn gen_attr_store(&mut self, id: &'a str, e: &TypedExpr<'a>) -> (TypeId, Reg, Option<Reg>) {
+        let (ty, offset) = self.attrs.get(id).copied().unwrap();
+        let (ty_expr, r1, r2) = self.gen_expr(e);
+        match ty_expr {
+            TypeId::INT if ty.is_int() => {
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r2}, QWORD PTR [rbp + 16]
+    mov     QWORD PTR [{r2} + {offset}], {r1}
+"
+                ));
+                self.free_reg(r2);
+                (TypeId::INT, r1, None)
+            }
+            TypeId::BOOL if ty.is_bool() => {
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r2}, QWORD PTR [rbp + 16]
+    mov     BYTE PTR [{r2} + {offset}], {r1}
+",
+                    r1 = r1.to_byte_string()
+                ));
+                self.free_reg(r2);
+                (TypeId::BOOL, r1, None)
+            }
+            TypeId::INT => {
+                self.push_text(&format!(
+                    r"    push    {r1}
+    call    Int_To_Object
+    add     rsp, 8
+"
+                ));
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r2}, QWORD PTR [rbp + 16]
+    mov     QWORD PTR [{r2} + {offset}], rax
+    mov     QWORD PTR [{r2} + {offset2}], rdx
+",
+                    offset2 = offset + 8
+                ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r2, Reg::Rdx);
+                (ty, r1, Some(r2))
+            }
+            TypeId::BOOL => {
+                self.push_text(&format!(
+                    r"    push    {r1}
+    call    Bool_To_Object
+    add     rsp, 8
+"
+                ));
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r2}, QWORD PTR [rbp + 16]
+    mov     QWORD PTR [{r2} + {offset}], rax
+    mov     QWORD PTR [{r2} + {offset2}], rdx
+",
+                    offset2 = offset + 8
+                ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r2, Reg::Rdx);
+                (ty, r1, Some(r2))
+            }
+            TypeId::STRING if !ty.is_string() => {
+                let r2 = r2.unwrap();
+                self.push_text(&format!(
+                    r"    push    {r2}
+    push    {r1}
+    call    String_To_Object
+    add     rsp, 16
+"
+                ));
+                self.push_text(&format!(
+                    r"    mov     {r2}, QWORD PTR [rbp + 16]
+    mov     QWORD PTR [{r2} + {offset}], rax
+    mov     QWORD PTR [{r2} + {offset2}], rdx
+",
+                    offset2 = offset + 8
+                ));
+                self.gen_mov(r1, Reg::Rax);
+                self.gen_mov(r2, Reg::Rdx);
+                (ty, r1, Some(r2))
+            }
+            _ => {
+                let r3 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r3}, QWORD PTR [rbp + 16]
+    mov     QWORD PTR [{r3} + {offset}], {r1}
+    mov     QWORD PTR [{r3} + {offset2}], {r2}
+",
+                    offset2 = offset + 8,
+                    r2 = r2.unwrap()
+                ));
+                self.free_reg(r3);
+                (ty, r1, r2)
+            }
+        }
+    }
+
+    fn gen_attr_load(&mut self, id: &'a str) -> (TypeId, Reg, Option<Reg>) {
+        let (ty, offset) = self.attrs.get(id).copied().unwrap();
+
         match ty {
             TypeId::INT => {
+                let r1 = self.alloc_reg().unwrap();
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r1}, QWORD PTR [rbp + 16]
+    mov     {r2}, QWORD PTR [{r1} + {offset}]
+"
+                ));
+                self.free_reg(r1);
+                (TypeId::INT, r2, None)
+            }
+            TypeId::BOOL => {
+                let r1 = self.alloc_reg().unwrap();
+                let r2 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r1}, QWORD PTR [rbp + 16]
+    movzx   {r2}, BYTE PTR [{r1} + {offset}]
+",
+                    r2 = r2.to_dword_string()
+                ));
+                self.free_reg(r1);
+                (TypeId::BOOL, r2, None)
+            }
+            _ => {
+                let r1 = self.alloc_reg().unwrap();
+                let r2 = self.alloc_reg().unwrap();
+                let r3 = self.alloc_reg().unwrap();
+                self.push_text(&format!(
+                    r"    mov     {r1}, QWORD PTR [rbp + 16]
+    mov     {r2}, QWORD PTR [{r1} + {offset}]
+    mov     {r3}, QWORD PTR [{r1} + {offset2}]
+",
+                    offset2 = offset + 8
+                ));
+                self.free_reg(r1);
+                (ty, r2, Some(r3))
+            }
+        }
+    }
+
+    fn gen_id(&mut self, id: &'a str) -> (TypeId, Reg, Option<Reg>) {
+        let Some((ty, offset)) = self.get_local(id) else {
+            return self.gen_attr_load(id);
+        };
+        match ty {
+            TypeId::INT => {
+                let (addr, _) = self.gen_stack_access(8, offset);
                 let r = self.alloc_reg().unwrap();
-                if offset < 0 {
-                    let offset = -offset;
-                    self.push_text(&format!("    mov     {r}, QWORD PTR [rbp - {offset}]\n"));
-                } else {
-                    self.push_text(&format!("    mov     {r}, QWORD PTR [rbp + {offset}]\n"));
-                }
+                self.push_text(&format!("    mov     {r}, {addr}\n"));
                 (TypeId::INT, r, None)
             }
             TypeId::BOOL => {
+                let (addr, _) = self.gen_stack_access(1, offset);
                 let r = self.alloc_reg().unwrap();
-                if offset < 0 {
-                    let offset = -offset;
-                    self.push_text(&format!("    mov     {r}, BYTE PTR [rbp - {offset}]\n"));
-                } else {
-                    self.push_text(&format!("    mov     {r}, BYTE PTR [rbp + {offset}]\n"));
-                }
+                self.push_text(&format!(
+                    "    movzx   {r}, {addr}\n",
+                    r = r.to_dword_string()
+                ));
                 (TypeId::BOOL, r, None)
             }
             _ => {
                 let r1 = self.alloc_reg().unwrap();
                 let r2 = self.alloc_reg().unwrap();
-                if offset < 0 {
-                    let offset = -offset;
-                    self.push_text(&format!(
-                        r"    mov     {r1}, QWORD PTR [rbp - {offset}]
-    mov     {r2}, QWORD PTR [rbp - {offset2}]
-",
-                        offset2 = offset + 8
-                    ));
-                } else {
-                    self.push_text(&format!(
-                        r"    mov     {r1}, QWORD PTR [rbp + {offset}]
-    mov     {r2}, QWORD PTR [rbp + {offset2}]
-",
-                        offset2 = offset + 8
-                    ));
-                }
+                let (addr1, addr2) = self.gen_stack_access(16, offset);
+                let addr2 = addr2.unwrap();
+                self.push_text(&format!(
+                    "    mov     {r1}, {addr1}\n    mov     {r2}, {addr2}\n",
+                ));
                 (ty, r1, Some(r2))
             }
         }
@@ -798,6 +1168,56 @@ _string_{label}_len:
         }
     }
 
+    fn gen_static_dispatch(
+        &mut self,
+        e: &TypedExpr<'a>,
+        e_ty: TypeId,
+        method_name: &'a str,
+        args: &[TypedExpr<'a>],
+        ret_ty: TypeId,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        let mut size = 0;
+        let method = self.class_env.get_method(e_ty, method_name).unwrap();
+        let params = method.params().to_owned();
+        for (arg, param_ty) in args.iter().zip(params).rev() {
+            size = self.gen_arg(param_ty, arg, size);
+        }
+        match e.ty {
+            TypeId::INT => return self.gen_dispatch_int_static(e, e_ty, method_name, ret_ty, size),
+            TypeId::BOOL => {
+                return self.gen_dispatch_bool_static(e, e_ty, method_name, ret_ty, size)
+            }
+            TypeId::STRING => {
+                return self.gen_dispatch_string_static(e, e_ty, method_name, ret_ty, size)
+            }
+            _ => {}
+        }
+        let (_, r1, r2) = self.gen_expr(e);
+        let r2 = r2.unwrap();
+        let class_name = self.class_env.get_class_name(e_ty).unwrap();
+        size += 16;
+        self.push_text(&format!(
+            r"    push    {r2}
+    push    {r1}
+    call    {class_name}_{method_name}
+    add     rsp, {size}
+",
+        ));
+        self.free_reg(r1);
+        self.free_reg(r2);
+        match ret_ty {
+            TypeId::INT | TypeId::BOOL => {
+                self.reserve_reg(Reg::Rax);
+                (ret_ty, Reg::Rax, None)
+            }
+            _ => {
+                self.reserve_reg(Reg::Rax);
+                self.reserve_reg(Reg::Rdx);
+                (ret_ty, Reg::Rax, Some(Reg::Rdx))
+            }
+        }
+    }
+
     fn gen_dispatch(
         &mut self,
         e: &TypedExpr<'a>,
@@ -833,7 +1253,6 @@ _string_{label}_len:
         ));
         self.free_reg(r1);
         self.free_reg(r2);
-        self.free_all_regs();
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
                 self.reserve_reg(Reg::Rax);
@@ -870,9 +1289,8 @@ _string_{label}_len:
         if method_class != "String" {
             self.push_text(
                 r"    call    String_To_Object
-    add     rsp, 16
-    push    rdx
-    push    rax
+    mov     QWORD PTR [rsp + 8], rdx
+    mov     QWORD PTR [rsp], rax
 ",
             );
         }
@@ -912,8 +1330,7 @@ _string_{label}_len:
         if method_class != "Int" {
             self.push_text(
                 r"    call    Int_To_Object
-    add     rsp, 8
-    push    rdx
+    mov     QWORD PTR [rsp], rdx
     push    rax
 ",
             );
@@ -955,8 +1372,7 @@ _string_{label}_len:
         if method_class != "Bool" {
             self.push_text(
                 r"    call    Bool_To_Object
-    add     rsp, 8
-    push    rdx
+    mov     QWORD PTR [rsp], rdx
     push    rax
 ",
             );
@@ -964,6 +1380,127 @@ _string_{label}_len:
         }
         self.push_text(&call);
         self.push_text(&format!("    add     rsp, {}\n", size));
+        match ret_ty {
+            TypeId::INT | TypeId::BOOL => {
+                self.reserve_reg(Reg::Rax);
+                (ret_ty, Reg::Rax, None)
+            }
+            _ => {
+                self.reserve_reg(Reg::Rax);
+                self.reserve_reg(Reg::Rdx);
+                (ret_ty, Reg::Rax, Some(Reg::Rdx))
+            }
+        }
+    }
+
+    fn gen_dispatch_string_static(
+        &mut self,
+        e: &TypedExpr<'a>,
+        e_ty: TypeId,
+        method_name: &'a str,
+        ret_ty: TypeId,
+        mut size: usize,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        let (_, r1, r2) = self.gen_expr(e);
+        let r2 = r2.unwrap();
+        self.push_text(&format!("    push    {r2}\n    push    {r1}\n"));
+        size += 16;
+        self.free_reg(r1);
+        self.free_reg(r2);
+        if e_ty != TypeId::STRING {
+            self.push_text(
+                r"    call    String_To_Object
+    mov     QWORD PTR [rsp + 8], rdx
+    mov     QWORD PTR [rsp], rax
+",
+            );
+        }
+        let class_name = self.class_env.get_class_name(e_ty).unwrap();
+        self.push_text(&format!(
+            r"    call    {class_name}_{method_name}
+    add     rsp, {size}
+",
+        ));
+        match ret_ty {
+            TypeId::INT | TypeId::BOOL => {
+                self.reserve_reg(Reg::Rax);
+                (ret_ty, Reg::Rax, None)
+            }
+            _ => {
+                self.reserve_reg(Reg::Rax);
+                self.reserve_reg(Reg::Rdx);
+                (ret_ty, Reg::Rax, Some(Reg::Rdx))
+            }
+        }
+    }
+
+    fn gen_dispatch_int_static(
+        &mut self,
+        e: &TypedExpr<'a>,
+        e_ty: TypeId,
+        method_name: &'a str,
+        ret_ty: TypeId,
+        mut size: usize,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        let (_, r, _) = self.gen_expr(e);
+        self.push_text(&format!("    push    {r}\n"));
+        self.free_reg(r);
+        size += 8;
+        if e_ty != TypeId::INT {
+            self.push_text(
+                r"    call    Int_To_Object
+    mov     QWORD PTR [rsp], rdx
+    push    rax
+",
+            );
+            size += 8;
+        }
+        let class_name = self.class_env.get_class_name(e_ty).unwrap();
+        self.push_text(&format!(
+            r"    call    {class_name}_{method_name}
+    add     rsp, {size}
+",
+        ));
+        match ret_ty {
+            TypeId::INT | TypeId::BOOL => {
+                self.reserve_reg(Reg::Rax);
+                (ret_ty, Reg::Rax, None)
+            }
+            _ => {
+                self.reserve_reg(Reg::Rax);
+                self.reserve_reg(Reg::Rdx);
+                (ret_ty, Reg::Rax, Some(Reg::Rdx))
+            }
+        }
+    }
+
+    fn gen_dispatch_bool_static(
+        &mut self,
+        e: &TypedExpr<'a>,
+        e_ty: TypeId,
+        method_name: &'a str,
+        ret_ty: TypeId,
+        mut size: usize,
+    ) -> (TypeId, Reg, Option<Reg>) {
+        let (_, r, _) = self.gen_expr(e);
+        self.push_text(&format!("    push    {r}\n"));
+        self.free_reg(r);
+        size += 8;
+        if e_ty != TypeId::BOOL {
+            self.push_text(
+                r"    call    Bool_To_Object
+    mov     QWORD PTR [rsp], rdx
+    push    rax
+",
+            );
+            size += 8;
+        }
+        let class_name = self.class_env.get_class_name(e_ty).unwrap();
+        self.push_text(&format!(
+            r"    call    {class_name}_{method_name}
+    add     rsp, {size}
+",
+        ));
         match ret_ty {
             TypeId::INT | TypeId::BOOL => {
                 self.reserve_reg(Reg::Rax);
@@ -994,8 +1531,7 @@ _string_{label}_len:
                 self.push_text(&format!(
                     r"    push    {r1}
     call    Int_To_Object
-    add     rsp, 8
-    push    rdx
+    mov     QWORD PTR [rsp], rdx
     push    rax
 "
                 ));
@@ -1006,8 +1542,7 @@ _string_{label}_len:
                 self.push_text(&format!(
                     r"    push    {r1}
     call    Bool_To_Object
-    add     rsp, 8
-    push    rdx
+    mov     QWORD PTR [rsp], rdx
     push    rax
 "
                 ));
@@ -1020,9 +1555,8 @@ _string_{label}_len:
                     r"    push    {r2}
     push    {r1}
     call    String_To_Object
-    add     rsp, 16
-    push    rdx
-    push    rax
+    mov     QWORD PTR [rsp + 8], rdx
+    mov     QWORD PTR [rsp], rax
 "
                 ));
                 self.free_reg(r1);
@@ -1046,22 +1580,22 @@ _string_{label}_len:
                 (ty, r1, None)
             }
             UnOp::Not => {
-                self.push_text(&format!("    not     {r1}\n"));
+                self.push_text(&format!("    xor     {r1}, 1\n"));
                 (ty, r1, None)
             }
             UnOp::IsVoid => match e.ty {
                 TypeId::INT | TypeId::BOOL => {
-                    self.push_text(&format!("mov     {r1}, 0\n"));
+                    self.push_text(&format!("    xor     {r1}, {r1}\n"));
                     (TypeId::BOOL, r1, None)
                 }
                 TypeId::STRING => {
-                    self.push_text(&format!("mov     {r1}, 0\n"));
+                    self.push_text(&format!("    xor     {r1}, {r1}\n"));
                     self.free_reg(r2.unwrap());
                     (TypeId::BOOL, r1, None)
                 }
                 _ => {
                     self.push_text(&format!(
-                        r"    cmp     {r1}, 0
+                        r"    test    {r1}, {r1}
     sete    {}
 ",
                         r1.to_byte_string()
@@ -1114,7 +1648,7 @@ _string_{label}_len:
             BinOp::Div => {
                 if matches!(r, Reg::Rax | Reg::Rdx) {
                     let r5 = self.alloc_reg_no_ret().unwrap();
-                    self.push_text(&format!("    mov     {r5}, {r}\n"));
+                    self.gen_mov(r5, r);
                     self.free_reg(r);
                     r = r5;
                 }
@@ -1122,9 +1656,9 @@ _string_{label}_len:
                     r"    pop    rax
     cqo
     idiv    {r}
-    mov     {r}, rax
 "
                 ));
+                self.gen_mov(r, Reg::Rax);
                 (TypeId::INT, r, None)
             }
 
@@ -1153,7 +1687,70 @@ _string_{label}_len:
     }
 
     fn gen_eq(&mut self, lhs: &TypedExpr<'a>, rhs: &TypedExpr<'a>) -> (TypeId, Reg, Option<Reg>) {
-        todo!()
+        let (ty, r1, r2) = self.gen_expr(lhs);
+        match ty {
+            TypeId::INT | TypeId::BOOL => {
+                self.push_text(&format!("    push    {r1}\n"));
+                self.free_reg(r1);
+                let (_, r3, _) = self.gen_expr(rhs);
+                self.push_text(&format!(
+                    r"    cmp     QWORD PTR [rsp], {r3}
+    sete    {r3_to_byte}
+    add     rsp, 8
+",
+                    r3_to_byte = r3.to_byte_string()
+                ));
+                (TypeId::BOOL, r3, None)
+            }
+            TypeId::STRING => {
+                let r2 = r2.unwrap();
+                self.push_text(&format!(
+                    r"    push    {r1}
+    push    {r2}
+",
+                ));
+                self.free_reg(r1);
+                self.free_reg(r2);
+                let (_, r3, r4) = self.gen_expr(rhs);
+                let r4 = r4.unwrap();
+                let label1 = self.cur_label;
+                let label2 = self.cur_label + 1;
+                self.cur_label += 2;
+                self.push_text(&format!(
+                    r"    cmp     QWORD PTR [rsp + 8], {r3}
+    jne     .L{label1}
+    push    {r4}
+    call    memory_compare
+    add     rsp, 24
+    mov     {r3}, rax
+    jmp     .L{label2}
+.L{label1}:
+    add     rsp, 16
+    xor     {r3}, {r3}
+.L{label2}:
+"
+                ));
+                self.free_reg(r4);
+                (TypeId::BOOL, r3, None)
+            }
+            _ => {
+                let r2 = r2.unwrap();
+                self.push_text(&format!("    push    {r1}\n"));
+                self.free_reg(r1);
+                self.free_reg(r2);
+                let (_, r3, r4) = self.gen_expr(rhs);
+                let r4 = r4.unwrap();
+                self.push_text(&format!(
+                    r"    cmp     QWORD PTR [rsp], {r3}
+    sete    {r3_to_byte}
+    add     rsp, 8
+",
+                    r3_to_byte = r3.to_byte_string()
+                ));
+                self.free_reg(r4);
+                (TypeId::BOOL, r3, None)
+            }
+        }
     }
 
     pub fn output(&self) -> String {
@@ -1162,6 +1759,7 @@ _string_{label}_len:
         output.push('\n');
         output.push_str(".data\n");
         output.push_str(&self.data_section);
+        output.push('\n');
         output.push_str(&fs::read_to_string("lib/data_section.s").unwrap());
         output.push('\n');
         output

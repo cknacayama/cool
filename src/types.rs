@@ -588,6 +588,10 @@ impl<'a> ClassEnv<'a> {
         Ok(self.classes.get(ty.to_index_or_err()?).unwrap())
     }
 
+    pub fn get_class_name(&self, ty: TypeId) -> Result<&'a str, TypeErrorKind<'a>> {
+        Ok(self.classes.get(ty.to_index_or_err()?).unwrap().id)
+    }
+
     pub fn insert_class(
         &mut self,
         ty: Type<'a>,
