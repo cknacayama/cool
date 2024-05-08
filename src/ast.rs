@@ -339,6 +339,50 @@ impl<'a> TypedExpr<'a> {
     pub fn new(kind: TypedExprKind<'a>, span: Span, ty: TypeId) -> Self {
         Self { kind, span, ty }
     }
+
+    pub fn count_labels(&self) -> usize {
+        match &self.kind {
+            TypedExprKind::Binary(BinOp::Eq, lhs, rhs) if lhs.ty.is_string() => {
+                lhs.count_labels() + rhs.count_labels() + 2
+            }
+            TypedExprKind::Binary(_, lhs, rhs) => lhs.count_labels() + rhs.count_labels(),
+            TypedExprKind::Unary(_, expr) => expr.count_labels(),
+            TypedExprKind::Assign(_, expr) => expr.count_labels(),
+            TypedExprKind::Dispatch(expr, _, args) => {
+                expr.count_labels() + args.iter().map(|arg| arg.count_labels()).sum::<usize>()
+            }
+            TypedExprKind::StaticDispatch(expr, _, _, args) => {
+                expr.count_labels() + args.iter().map(|arg| arg.count_labels()).sum::<usize>()
+            }
+            TypedExprKind::SelfDispatch(_, args) => {
+                args.iter().map(|arg| arg.count_labels()).sum::<usize>()
+            }
+            TypedExprKind::If(cond, then, else_) => {
+                cond.count_labels() + then.count_labels() + else_.count_labels() + 2
+            }
+            TypedExprKind::While(cond, body) => cond.count_labels() + body.count_labels() + 2,
+            TypedExprKind::Block(exprs) => {
+                exprs.iter().map(|expr| expr.count_labels()).sum::<usize>()
+            }
+            TypedExprKind::Let(formals, body) => {
+                formals
+                    .iter()
+                    .map(|(_, init)| init.as_ref().map_or(0, TypedExpr::count_labels))
+                    .sum::<usize>()
+                    + body.count_labels()
+            }
+            TypedExprKind::Case(expr, arms) => {
+                expr.count_labels()
+                    + arms
+                        .iter()
+                        .map(|arm| arm.expr.count_labels())
+                        .sum::<usize>()
+                    + arms.len() * 3
+                    + 2
+            }
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

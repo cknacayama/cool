@@ -127,8 +127,9 @@ impl<'a> Checker<'a> {
         self.cur_init_size = 8;
 
         let mut vtable = parent_data.vtable().to_vec();
-        vtable[0].0 = id;
-        vtable[2].0 = id;
+        vtable[0].0 = parent_data.id();
+        vtable[1].0 = id;
+        vtable[3].0 = id;
 
         let data = ClassTypeData::new(
             id,
@@ -454,7 +455,7 @@ impl<'a> Checker<'a> {
 
         let ty = self
             .class_env
-            .join_fold(checked_arms.iter().map(|arm| arm.ty), self.cur_class)
+            .join_fold(checked_arms.iter().map(|arm| arm.expr.ty), self.cur_class)
             .map_err(|kind| TypeError::new(kind, span))?;
 
         Ok(TypedExpr::new(

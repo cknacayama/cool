@@ -1,68 +1,73 @@
-Object_Table:
-    .quad Object_New
-    .quad Object_abort
-    .quad Object_type_name
-    .quad Object_copy
+Object.Table:
+    .quad 0
+    .quad Object.New
+    .quad Object.abort
+    .quad Object.type_name
+    .quad Object.copy
 
-String_Table:
-    .quad String_New
-    .quad Object_abort
-    .quad String_type_name
-    .quad Object_copy
-    .quad String_length
-    .quad String_concat
-    .quad String_substr
+String.Table:
+    .quad Object.Table
+    .quad String.New
+    .quad Object.abort
+    .quad String.type_name
+    .quad Object.copy
+    .quad String.length
+    .quad String.concat
+    .quad String.substr
 
-Int_Table:
-    .quad Int_New
-    .quad Object_abort
-    .quad Int_type_name
-    .quad Int_copy
+Int.Table:
+    .quad Object.Table
+    .quad Int.New
+    .quad Object.abort
+    .quad Int.type_name
+    .quad Int.copy
 
-Bool_Table:
-    .quad Bool_New
-    .quad Object_abort
-    .quad Bool_type_name
-    .quad Bool_copy
+Bool.Table:
+    .quad Object.Table
+    .quad Bool.New
+    .quad Object.abort
+    .quad Bool.type_name
+    .quad Bool.copy
 
-IO_Table:
-    .quad IO_New
-    .quad Object_abort
-    .quad IO_type_name
-    .quad Object_copy
-    .quad IO_out_string
-    .quad IO_out_int
-    .quad IO_in_string
-    .quad IO_in_int
+IO.Table:
+    .quad Object.Table
+    .quad IO.New
+    .quad Object.abort
+    .quad IO.type_name
+    .quad Object.copy
+    .quad IO.out_string
+    .quad IO.out_int
+    .quad IO.in_string
+    .quad IO.in_int
 
-Object_Typename:
+Object.Typename:
     .string "Object"
     .align 8
-Object_Typenamelen:
+Object.Typenamelen:
     .quad 6
 
-IO_Typename:
+IO.Typename:
     .string "IO"
     .align 8
-IO_Typenamelen:
+IO.Typenamelen:
     .quad 2
 
-String_Typename:
+String.Typename:
     .string "String"
     .align 8
-String_Typenamelen:
+String.Typenamelen:
     .quad 6
 
-Int_Typename:
+Int.Typename:
     .string "Int"
     .align 8
-Int_Typenamelen:
+Int.Typenamelen:
     .quad 3
 
-Bool_Typename:
+Bool.Typename:
     .string "Bool"
     .align 8
-Bool_Typenamelen:
+Bool.Typenamelen:
     .quad 4
 
 _empty_string:

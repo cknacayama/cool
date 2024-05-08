@@ -471,7 +471,7 @@ impl<'a> ClassEnv<'a> {
 
         macro_rules! builtin_vtable {
             ($id:literal, [ $($method:expr),* ]) => {
-                vec![ ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+                vec![ ("Object", "Table"), ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
             };
         }
 
@@ -531,6 +531,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("in_int", [], TypeId::INT),
             ]),
             vec![
+                ("Object", "Table"),
                 ("IO", "New"),
                 ("Object", "abort"),
                 ("IO", "type_name"),
