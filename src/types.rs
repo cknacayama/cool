@@ -1,9 +1,14 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     num::NonZeroU32,
 };
 
-use crate::span::Span;
+use crate::{
+    ast::Class,
+    index_vec::{self, index_vec, IndexVec, Key},
+    span::Span,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeErrorKind<'a> {
@@ -211,6 +216,10 @@ impl TypeId {
         }
     }
 
+    fn new_class(id: u32) -> Option<Self> {
+        NonZeroU32::new(id).map(|id| Self::Class(ClassId(id)))
+    }
+
     pub fn size_of(self) -> usize {
         match self {
             TypeId::BOOL => 1,
@@ -232,17 +241,6 @@ impl TypeId {
             TypeId::Class(id) => Some(id.0),
             _ => None,
         }
-    }
-
-    fn to_index(self) -> Option<usize> {
-        match self {
-            TypeId::Class(id) => Some((id.0.get() - 1) as usize),
-            _ => None,
-        }
-    }
-
-    fn to_index_or_err(self) -> Result<usize, TypeErrorKind<'static>> {
-        self.to_index().ok_or(TypeErrorKind::CannotIndexSelfType)
     }
 
     pub fn is_self_type(self) -> bool {
@@ -290,6 +288,15 @@ impl TypeId {
         match self {
             Self::SelfType => f(),
             ty => ty,
+        }
+    }
+}
+
+impl index_vec::Key for TypeId {
+    fn to_index(self) -> usize {
+        match self {
+            TypeId::Class(id) => (id.0.get() - 1) as usize,
+            _ => unreachable!(),
         }
     }
 }
@@ -349,12 +356,12 @@ impl<'a> MethodTypeData<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ClassTypeData<'a> {
     id:         &'a str,
     parent:     Option<TypeId>,
-    attrs:      HashMap<&'a str, TypeId>,
-    attrs_size: usize, // this includes the size of the parent class
+    attrs:      HashMap<&'a str, (TypeId, usize)>, // (type, offset)
+    attrs_size: usize,                             // this includes the size of the parent class
     methods:    HashMap<&'a str, MethodTypeData<'a>>,
     vtable:     Vec<(&'a str, &'a str)>,
 }
@@ -363,7 +370,7 @@ impl<'a> ClassTypeData<'a> {
     pub fn new(
         id: &'a str,
         parent: Option<TypeId>,
-        attrs: HashMap<&'a str, TypeId>,
+        attrs: HashMap<&'a str, (TypeId, usize)>,
         attrs_size: usize,
         methods: HashMap<&'a str, MethodTypeData<'a>>,
         vtable: Vec<(&'a str, &'a str)>,
@@ -392,7 +399,7 @@ impl<'a> ClassTypeData<'a> {
         self.parent
     }
 
-    pub fn attrs(&self) -> &HashMap<&'a str, TypeId> {
+    pub fn attrs(&self) -> &HashMap<&'a str, (TypeId, usize)> {
         &self.attrs
     }
 
@@ -449,7 +456,7 @@ impl<'a> ObjectEnv<'a> {
 #[derive(Debug)]
 pub struct ClassEnv<'a> {
     types:   HashMap<Type<'a>, TypeId>,
-    classes: Vec<ClassTypeData<'a>>,
+    classes: IndexVec<TypeId, ClassTypeData<'a>>,
 }
 
 impl<'a> Default for ClassEnv<'a> {
@@ -461,7 +468,112 @@ impl<'a> Default for ClassEnv<'a> {
 impl<'a> ClassEnv<'a> {
     /// Create a new ClassEnv with the built-in classes.
     pub fn new() -> Self {
-        let mut classes = vec![];
+        let mut classes = IndexVec::with_capacity(5);
+
+        macro_rules! builtin_method {
+            ($id:literal, [ $($param:expr),* ], $return_ty:expr) => {
+                ($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty))
+            };
+        }
+
+        macro_rules! builtin_vtable {
+            ($id:literal, [ $($method:expr),* ]) => {
+                vec![ ("Object", "Table"), ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+            };
+        }
+
+        let object = ClassTypeData::new(
+            "Object",
+            None,
+            HashMap::new(),
+            0,
+            HashMap::from([
+                builtin_method!("abort", [], TypeId::OBJECT),
+                builtin_method!("type_name", [], TypeId::STRING),
+                builtin_method!("copy", [], TypeId::SelfType),
+            ]),
+            builtin_vtable!("Object", []),
+        )
+        .unwrap();
+        let bool_ = ClassTypeData::new(
+            "Bool",
+            Some(TypeId::OBJECT),
+            HashMap::new(),
+            0,
+            HashMap::new(),
+            builtin_vtable!("Bool", []),
+        )
+        .unwrap();
+        let int = ClassTypeData::new(
+            "Int",
+            Some(TypeId::OBJECT),
+            HashMap::new(),
+            0,
+            HashMap::new(),
+            builtin_vtable!("Int", []),
+        )
+        .unwrap();
+        let string = ClassTypeData::new(
+            "String",
+            Some(TypeId::OBJECT),
+            HashMap::new(),
+            0,
+            HashMap::from([
+                builtin_method!("length", [], TypeId::INT),
+                builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
+                builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
+            ]),
+            builtin_vtable!("String", ["length", "concat", "substr"]),
+        )
+        .unwrap();
+        let io = ClassTypeData::new(
+            "IO",
+            Some(TypeId::OBJECT),
+            HashMap::new(),
+            0,
+            HashMap::from([
+                builtin_method!("out_string", [TypeId::STRING], TypeId::SelfType),
+                builtin_method!("out_int", [TypeId::INT], TypeId::SelfType),
+                builtin_method!("in_string", [], TypeId::STRING),
+                builtin_method!("in_int", [], TypeId::INT),
+            ]),
+            vec![
+                ("Object", "Table"),
+                ("IO", "New"),
+                ("Object", "abort"),
+                ("IO", "type_name"),
+                ("Object", "copy"),
+                ("IO", "out_string"),
+                ("IO", "out_int"),
+                ("IO", "in_string"),
+                ("IO", "in_int"),
+            ],
+        )
+        .unwrap();
+
+        let types = HashMap::from([
+            (Type::Object, TypeId::OBJECT),
+            (Type::Int, TypeId::INT),
+            (Type::Bool, TypeId::BOOL),
+            (Type::String, TypeId::STRING),
+            (Type::SelfType, TypeId::SelfType),
+            (IO_CLASS, TypeId::IO),
+        ]);
+
+        classes.push(object);
+        classes.push(int);
+        classes.push(bool_);
+        classes.push(string);
+        classes.push(io);
+
+        assert_eq!(classes.len(), types.len() - 1);
+
+        Self { types, classes }
+    }
+
+    pub fn from_ienv(ienv: IClassEnv<'a>) -> Self {
+        let mut classes = IndexVec::with_capacity(ienv.classes.len());
+        let types = ienv.types;
 
         macro_rules! builtin_method {
             ($id:literal, [ $($param:expr),* ], $return_ty:expr) => {
@@ -550,23 +662,11 @@ impl<'a> ClassEnv<'a> {
         classes.push(string);
         classes.push(io);
 
-        let types = HashMap::from([
-            (Type::Object, TypeId::OBJECT),
-            (Type::Int, TypeId::INT),
-            (Type::Bool, TypeId::BOOL),
-            (Type::String, TypeId::STRING),
-            (Type::SelfType, TypeId::SelfType),
-            (IO_CLASS, TypeId::IO),
-        ]);
-
         Self { types, classes }
     }
 
-    fn get_parent(&self, ty: TypeId) -> Result<Option<TypeId>, TypeErrorKind<'static>> {
-        match ty.to_index() {
-            None => Err(TypeErrorKind::CannotIndexSelfType),
-            Some(index) => Ok(self.classes.get(index).unwrap().parent),
-        }
+    fn get_parent(&self, ty: TypeId) -> Option<TypeId> {
+        self.classes.get(ty).unwrap().parent
     }
 
     pub fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
@@ -586,11 +686,33 @@ impl<'a> ClassEnv<'a> {
     }
 
     pub fn get_class(&self, ty: TypeId) -> Result<&ClassTypeData<'a>, TypeErrorKind<'a>> {
-        Ok(self.classes.get(ty.to_index_or_err()?).unwrap())
+        Ok(self.classes.get(ty).unwrap())
     }
 
     pub fn get_class_name(&self, ty: TypeId) -> Result<&'a str, TypeErrorKind<'a>> {
-        Ok(self.classes.get(ty.to_index_or_err()?).unwrap().id)
+        Ok(self.classes.get(ty).unwrap().id)
+    }
+
+    pub fn insert_class_id(
+        &mut self,
+        ty: TypeId,
+        data: ClassTypeData<'a>,
+    ) -> Result<(), TypeErrorKind<'a>> {
+        if self.get_type(&Type::Class(data.id())) != Some(ty) {
+            return Err(TypeErrorKind::UndefinedClass(data.id()));
+        }
+
+        match self.classes.get_mut(ty) {
+            Some(class_data) => *class_data = data,
+            None => {
+                let len = ty.to_index() + 1 - self.classes.len();
+                self.classes
+                    .extend((0..len).map(|_| ClassTypeData::default()));
+                self.classes[ty] = data;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn insert_class(
@@ -613,15 +735,15 @@ impl<'a> ClassEnv<'a> {
         &self,
         ty: TypeId,
         method: &'a str,
-    ) -> Result<&MethodTypeData, TypeErrorKind<'a>> {
-        let mut data = &self.classes[ty.to_index_or_err()?];
+    ) -> Result<&MethodTypeData<'a>, TypeErrorKind<'a>> {
+        let mut data = &self.classes[ty];
 
         loop {
             if let Some(data) = data.methods.get(method) {
                 return Ok(data);
             }
             match data.parent {
-                Some(parent) => data = &self.classes[parent.to_index().unwrap()],
+                Some(parent) => data = &self.classes[parent],
                 None => break,
             };
         }
@@ -635,7 +757,7 @@ impl<'a> ClassEnv<'a> {
         method: &'a str,
         data: MethodTypeData<'a>,
     ) -> Result<(), TypeErrorKind<'a>> {
-        if let Some(parent) = self.get_parent(ty)? {
+        if let Some(parent) = self.get_parent(ty) {
             match self.get_method(parent, method) {
                 Ok(parent_method) if parent_method != &data => {
                     return Err(TypeErrorKind::RedefinedMethod(ty, method))
@@ -647,7 +769,7 @@ impl<'a> ClassEnv<'a> {
             }
         }
 
-        let class_data = &mut self.classes[ty.to_index_or_err()?];
+        let class_data = &mut self.classes[ty];
 
         match class_data.vtable.iter_mut().find(|(_, m)| *m == method) {
             Some((id, _)) => *id = class_data.id,
@@ -660,39 +782,30 @@ impl<'a> ClassEnv<'a> {
         }
     }
 
-    pub fn get_attribute(&self, ty: TypeId, attr: &'a str) -> Result<TypeId, TypeErrorKind<'a>> {
-        let mut data = &self.classes[ty.to_index_or_err()?];
-
-        loop {
-            if let Some(data) = data.attrs.get(attr) {
-                return Ok(*data);
-            }
-            match data.parent {
-                Some(parent) => data = &self.classes[parent.to_index().unwrap()],
-                None => break,
-            };
+    pub fn get_attribute(
+        &self,
+        ty: TypeId,
+        attr: &'a str,
+    ) -> Result<(TypeId, usize), TypeErrorKind<'a>> {
+        match self.classes[ty].attrs.get(attr) {
+            Some(data) => Ok(*data),
+            None => Err(TypeErrorKind::UndefinedObject(attr)),
         }
-
-        Err(TypeErrorKind::UndefinedObject(attr))
     }
 
     pub fn insert_attribute(
         &mut self,
         ty: TypeId,
+        offset: usize,
         attr: &'a str,
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
-        match self.get_attribute(ty, attr) {
-            Ok(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
-            Err(_) => {
-                let class_data = &mut self.classes[ty.to_index_or_err()?];
-                match class_data.attrs.insert(attr, data) {
-                    Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
-                    None => {
-                        class_data.attrs_size = data.align_size(class_data.attrs_size);
-                        Ok(())
-                    }
-                }
+        let class_data = &mut self.classes[ty];
+        match class_data.attrs.insert(attr, (data, offset)) {
+            Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
+            None => {
+                class_data.attrs_size = data.align_size(class_data.attrs_size);
+                Ok(())
             }
         }
     }
@@ -717,10 +830,7 @@ impl<'a> ClassEnv<'a> {
         }
 
         loop {
-            let class = &self.classes[cur_lhs.to_index().unwrap()];
-            if class.parent == Some(rhs) {
-                return Ok(());
-            }
+            let class = &self.classes[cur_lhs];
             match class.parent {
                 Some(parent) if parent == rhs => return Ok(()),
                 Some(parent) => cur_lhs = parent,
@@ -754,7 +864,7 @@ impl<'a> ClassEnv<'a> {
         let mut rhs_ancestors = HashSet::new();
 
         loop {
-            let class = &self.classes[rhs.to_index().unwrap()];
+            let class = &self.classes[rhs];
             rhs_ancestors.insert(rhs);
             match class.parent {
                 Some(parent) => rhs = parent,
@@ -763,7 +873,7 @@ impl<'a> ClassEnv<'a> {
         }
 
         loop {
-            let class = &self.classes[lhs.to_index().unwrap()];
+            let class = &self.classes[lhs];
             if rhs_ancestors.contains(&lhs) {
                 return Ok(lhs);
             }
@@ -788,6 +898,189 @@ impl<'a> ClassEnv<'a> {
         };
 
         types.try_fold(first, |acc, ty| self.join(acc, ty, current_class))
+    }
+}
+
+/// Intermidiate class data used during type checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IClassTypeData<'a> {
+    id:     &'a str,
+    depth:  usize,
+    parent: Result<Option<TypeId>, Type<'a>>,
+}
+
+impl<'a> IClassTypeData<'a> {
+    pub fn new(id: &'a str, parent: Result<Option<TypeId>, Type<'a>>, depth: usize) -> Self {
+        Self { id, parent, depth }
+    }
+
+    pub fn id(&self) -> &'a str {
+        self.id
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub fn parent(&self) -> Result<Option<TypeId>, Type<'a>> {
+        self.parent
+    }
+}
+
+/// Intermidiate class environment used during type checking.
+#[derive(Debug)]
+pub struct IClassEnv<'a> {
+    types:    HashMap<Type<'a>, TypeId>,
+    classes:  IndexVec<TypeId, IClassTypeData<'a>>,
+    children: IndexVec<TypeId, Vec<TypeId>>,
+}
+
+impl<'a> IClassEnv<'a> {
+    pub fn new() -> Self {
+        let classes = index_vec![
+            IClassTypeData::new("Object", Ok(None), 0),
+            IClassTypeData::new("Int", Ok(Some(TypeId::OBJECT)), 1),
+            IClassTypeData::new("Bool", Ok(Some(TypeId::OBJECT)), 1),
+            IClassTypeData::new("String", Ok(Some(TypeId::OBJECT)), 1),
+            IClassTypeData::new("IO", Ok(Some(TypeId::OBJECT)), 1),
+        ];
+        let children = index_vec![
+            vec![TypeId::INT, TypeId::BOOL, TypeId::STRING, TypeId::IO],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ];
+
+        let types = HashMap::from([
+            (Type::Object, TypeId::OBJECT),
+            (Type::Int, TypeId::INT),
+            (Type::Bool, TypeId::BOOL),
+            (Type::String, TypeId::STRING),
+            (Type::SelfType, TypeId::SelfType),
+            (IO_CLASS, TypeId::IO),
+        ]);
+
+        assert_eq!(classes.len(), children.len());
+        assert_eq!(types.len() - 1, classes.len());
+
+        Self {
+            types,
+            classes,
+            children,
+        }
+    }
+
+    pub fn order(&self, lhs: TypeId, rhs: TypeId) -> Ordering {
+        let lhs_depth = self.classes[lhs].depth;
+        let rhs_depth = self.classes[rhs].depth;
+
+        lhs_depth.cmp(&rhs_depth)
+    }
+
+    pub fn sort_classes(&mut self, classes: &mut [Class<'a>]) -> Result<(), TypeErrorKind<'a>> {
+        self.update_parents(classes.iter().map(|c| Type::Class(c.id)).rev())?;
+        self.update_depths();
+
+        classes.sort_by(|lhs, rhs| {
+            let lhs_id = *self.types.get(&Type::Class(lhs.id)).unwrap();
+            let rhs_id = *self.types.get(&Type::Class(rhs.id)).unwrap();
+            self.order(lhs_id, rhs_id)
+        });
+
+        Ok(())
+    }
+
+    fn update_parents<T>(&mut self, classes: T) -> Result<(), TypeErrorKind<'a>>
+    where
+        T: IntoIterator<Item = Type<'a>>,
+    {
+        classes
+            .into_iter()
+            .try_for_each(|ty| self.update_parent(ty))
+            .map(|_| self.update_depths())
+    }
+
+    fn update_parent(&mut self, parent_ty: Type<'a>) -> Result<(), TypeErrorKind<'a>> {
+        let parent_id = self
+            .types
+            .get(&parent_ty)
+            .copied()
+            .ok_or(TypeErrorKind::UndefinedClass(parent_ty.to_str()))?;
+
+        let parent_depth = self.classes[parent_id].depth;
+        let parent_index = parent_id;
+
+        for (i, class) in self
+            .classes
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, class)| class.parent == Err(parent_ty))
+        {
+            if parent_depth > 0 {
+                class.depth = parent_depth + 1;
+            }
+            self.children[parent_index].push(TypeId::new_class(i as u32 + 1).unwrap());
+            class.parent = Ok(Some(parent_id));
+        }
+
+        Ok(())
+    }
+
+    fn update_depths(&mut self) {
+        let mut stack = vec![(TypeId::OBJECT, 0)];
+
+        while let Some((ty, depth)) = stack.pop() {
+            let idx = ty;
+
+            self.classes[idx].depth = depth;
+
+            for child in self.children[idx].iter().copied() {
+                stack.push((child, depth + 1));
+            }
+        }
+    }
+
+    pub fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
+        self.types.get(ty).copied()
+    }
+
+    fn insert_type(&mut self, ty: Type<'a>) -> Result<TypeId, TypeErrorKind<'a>> {
+        let id: u32 = (self.classes.len() + 1)
+            .try_into()
+            .expect("too many classes");
+        let id = TypeId::Class(ClassId(NonZeroU32::new(id).unwrap()));
+
+        match self.types.insert(ty, id) {
+            Some(class_id) => Err(TypeErrorKind::RedefinedClass(class_id)),
+            None => Ok(id),
+        }
+    }
+
+    pub fn insert_class(
+        &mut self,
+        ty: Type<'a>,
+        parent: Result<Option<TypeId>, Type<'a>>,
+    ) -> Result<TypeId, TypeErrorKind<'a>> {
+        if let Type::SelfType = ty {
+            return Err(TypeErrorKind::CannotRedefineSelfType);
+        }
+
+        let id = self.insert_type(ty)?;
+
+        let depth = match parent {
+            Ok(Some(parent)) => {
+                self.children[parent].push(id);
+                self.classes[parent].depth + 1
+            }
+            _ => 0,
+        };
+
+        self.classes
+            .push(IClassTypeData::new(ty.to_str(), parent, depth));
+        self.children.push(Vec::new());
+
+        Ok(id)
     }
 }
 

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::{
     ast::*,
-    lexer::{LexError, LexErrorKind, Lexer},
-    parser::{ParseError, ParseErrorKind, Parser},
+    lexer::{LexError, LexErrorKind},
+    parser::{ParseError, ParseErrorKind, ParseResult, Parser},
     span::Span,
     types::*,
 };
@@ -12,6 +12,7 @@ use crate::{
 pub struct Checker<'a> {
     object_envs:     Vec<ObjectEnv<'a>>,
     is_in_method:    bool,
+    env_ready:       bool,
     cur_class:       TypeId,
     cur_stack_size:  usize,
     cur_init_size:   usize,
@@ -33,7 +34,21 @@ impl<'a> Checker<'a> {
             cur_init_size:   0,
             cur_attr_offset: 0,
             is_in_method:    false,
+            env_ready:       false,
             class_env:       ClassEnv::new(),
+            cur_class:       TypeId::SelfType,
+        }
+    }
+
+    fn from_class_env(env: ClassEnv<'a>) -> Self {
+        Self {
+            object_envs:     vec![],
+            cur_stack_size:  0,
+            cur_init_size:   0,
+            cur_attr_offset: 0,
+            is_in_method:    false,
+            env_ready:       true,
+            class_env:       env,
             cur_class:       TypeId::SelfType,
         }
     }
@@ -51,7 +66,11 @@ impl<'a> Checker<'a> {
             .iter()
             .rev()
             .find_map(|env| env.get(id))
-            .or_else(|| self.get_attribute(self.cur_class, id).ok())
+            .or_else(|| {
+                self.get_attribute(self.cur_class, id)
+                    .map(|(ty, _)| ty)
+                    .ok()
+            })
     }
 
     fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
@@ -72,7 +91,11 @@ impl<'a> Checker<'a> {
         ty: Type<'a>,
         data: ClassTypeData<'a>,
     ) -> Result<TypeId, TypeErrorKind<'a>> {
-        self.class_env.insert_class(ty, data)
+        if self.env_ready {
+            Ok(self.get_type(&ty).unwrap())
+        } else {
+            self.class_env.insert_class(ty, data)
+        }
     }
 
     fn get_method(
@@ -89,20 +112,33 @@ impl<'a> Checker<'a> {
         method: &'a str,
         data: MethodTypeData<'a>,
     ) -> Result<(), TypeErrorKind<'a>> {
-        self.class_env.insert_method(ty, method, data)
+        if self.env_ready {
+            Ok(())
+        } else {
+            self.class_env.insert_method(ty, method, data)
+        }
     }
 
-    fn get_attribute(&self, ty: TypeId, attr: &'a str) -> Result<TypeId, TypeErrorKind<'a>> {
+    fn get_attribute(
+        &self,
+        ty: TypeId,
+        attr: &'a str,
+    ) -> Result<(TypeId, usize), TypeErrorKind<'a>> {
         self.class_env.get_attribute(ty, attr)
     }
 
     fn insert_attribute(
         &mut self,
         ty: TypeId,
+        offset: usize,
         attr: &'a str,
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
-        self.class_env.insert_attribute(ty, attr, data)
+        if self.env_ready {
+            Ok(())
+        } else {
+            self.class_env.insert_attribute(ty, offset, attr, data)
+        }
     }
 
     fn is_subtype(&self, lhs: TypeId, rhs: TypeId) -> Result<(), TypeErrorKind<'a>> {
@@ -134,7 +170,7 @@ impl<'a> Checker<'a> {
         let data = ClassTypeData::new(
             id,
             Some(parent),
-            HashMap::new(),
+            parent_data.attrs().clone(),
             self.cur_attr_offset,
             HashMap::new(),
             vtable,
@@ -214,11 +250,10 @@ impl<'a> Checker<'a> {
                     .map(|_| init)
             })
             .transpose()?;
-        self.insert_attribute(ty, id, attr_ty)
-            .map_err(|kind| TypeError::new(kind, span))?;
-
         let offset = attr_ty.align_offset(self.cur_attr_offset);
         self.cur_attr_offset = offset + attr_ty.size_of();
+        self.insert_attribute(ty, offset, id, attr_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
 
         Ok(TypedAttribute::new(id, attr_ty, init, offset, span))
     }
@@ -783,64 +818,261 @@ impl<'a> From<TypeError<'a>> for SemanticError<'a> {
 
 pub type SemanticResult<'a, T> = Result<T, SemanticError<'a>>;
 
-#[derive(Debug)]
-pub struct SemanticChecker<'a> {
-    parser:  Parser<'a>,
-    checker: Checker<'a>,
+pub trait TypeChecker<'a>: Iterator<Item = SemanticResult<'a, TypedClass<'a>>> {
+    fn check_all(self) -> SemanticResult<'a, (Vec<TypedClass<'a>>, ClassEnv<'a>)>;
 }
 
-impl<'a> SemanticChecker<'a> {
-    pub fn from_input(input: &'a str) -> Self {
+#[derive(Debug)]
+struct PrototypeChecker<'a> {
+    env:             Option<ClassEnv<'a>>,
+    cur_class:       TypeId,
+    cur_attr_offset: usize,
+}
+
+impl<'a> PrototypeChecker<'a> {
+    fn new() -> Self {
+        Self {
+            env:             None,
+            cur_class:       TypeId::SelfType,
+            cur_attr_offset: 0,
+        }
+    }
+
+    fn run(mut self, classes: &mut [Class<'a>]) -> TypeResult<'a, ClassEnv<'a>> {
+        let ienv = self.first_pass(classes)?;
+        self.second_pass(ienv, classes)?;
+        Ok(self.env.unwrap())
+    }
+
+    fn first_pass(&mut self, classes: &mut [Class<'a>]) -> TypeResult<'a, IClassEnv<'a>> {
+        let mut ienv = IClassEnv::new();
+
+        classes
+            .iter()
+            .try_for_each(|class| self.check_type(class, &mut ienv).map(|_| ()))?;
+
+        ienv.sort_classes(classes)
+            .map_err(|kind| TypeError::new(kind, Span::default()))
+            .map(|_| ienv)
+    }
+
+    fn second_pass(&mut self, ienv: IClassEnv<'a>, classes: &[Class<'a>]) -> TypeResult<'a, ()> {
+        self.env = Some(ClassEnv::from_ienv(ienv));
+
+        classes
+            .iter()
+            .try_for_each(|class| self.check_class(class).map(|_| ()))
+    }
+
+    fn check_class(&mut self, class: &Class<'a>) -> TypeResult<'a, TypeId> {
+        let Class {
+            id,
+            parent,
+            features,
+            span,
+        } = class;
+
+        let parent_id = self.get_type(parent).unwrap();
+
+        let parent_data = self
+            .env
+            .as_ref()
+            .and_then(|env| env.get_class(parent_id).ok())
+            .unwrap();
+
+        self.cur_attr_offset = parent_data.attrs_size();
+
+        let mut vtable = parent_data.vtable().to_vec();
+
+        vtable[0].0 = parent_data.id();
+        vtable[1].0 = id;
+        vtable[3].0 = id;
+
+        let data = ClassTypeData::new(
+            id,
+            Some(parent_id),
+            parent_data.attrs().clone(),
+            self.cur_attr_offset,
+            HashMap::new(),
+            vtable,
+        )
+        .map_err(|kind| TypeError::new(kind, *span))?;
+
+        let ty = Type::Class(id);
+
+        let ty_id = self.get_type(&ty).unwrap();
+
+        self.env
+            .as_mut()
+            .unwrap()
+            .insert_class_id(ty_id, data)
+            .map_err(|kind| TypeError::new(kind, *span))?;
+
+        self.cur_class = ty_id;
+
+        features
+            .iter()
+            .try_for_each(|feat| self.check_feature(feat))?;
+
+        Ok(ty_id)
+    }
+
+    fn check_feature(&mut self, feat: &Feature<'a>) -> TypeResult<'a, ()> {
+        match &feat.kind {
+            FeatureKind::Method {
+                id,
+                params,
+                return_ty,
+                ..
+            } => self.check_method(id, params, return_ty, feat.span),
+
+            FeatureKind::Attribute { id, ty, .. } => self.check_attribute(id, ty, feat.span),
+        }
+    }
+
+    fn check_attribute(
+        &mut self,
+        id: &'a str,
+        attr_ty: &Type<'a>,
+        span: Span,
+    ) -> TypeResult<'a, ()> {
+        let ty = self.cur_class;
+        let attr_ty = self
+            .get_type_or_err(attr_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
+        let offset = attr_ty.align_offset(self.cur_attr_offset);
+        self.cur_attr_offset = offset + attr_ty.size_of();
+        self.env
+            .as_mut()
+            .unwrap()
+            .insert_attribute(ty, offset, id, attr_ty)
+            .map_err(|kind| TypeError::new(kind, span))?;
+
+        Ok(())
+    }
+
+    fn check_method(
+        &mut self,
+        id: &'a str,
+        params: &[Formal<'a>],
+        return_ty: &Type<'a>,
+        span: Span,
+    ) -> TypeResult<'a, ()> {
+        let ty = self.cur_class;
+        let method_params = params
+            .iter()
+            .map(|formal| {
+                self.get_type(&formal.ty).ok_or_else(|| {
+                    TypeError::new(
+                        TypeErrorKind::UndefinedClass(formal.ty.to_str()),
+                        formal.span,
+                    )
+                })
+            })
+            .collect::<Result<Box<_>, _>>()?;
+        let method_return_ty = self.get_type(return_ty).ok_or_else(|| {
+            TypeError::new(TypeErrorKind::UndefinedClass(return_ty.to_str()), span)
+        })?;
+        let method_ty = MethodTypeData::new(id, method_params, method_return_ty);
+
+        self.env
+            .as_mut()
+            .unwrap()
+            .insert_method(ty, id, method_ty)
+            .map_err(|kind| TypeError::new(kind, span))
+    }
+
+    fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
+        self.env.as_ref().and_then(|env| env.get_type(ty))
+    }
+
+    fn get_type_or_err(&self, ty: &Type<'a>) -> Result<TypeId, TypeErrorKind<'a>> {
+        self.get_type(ty)
+            .ok_or_else(|| TypeErrorKind::UndefinedClass(ty.to_str()))
+    }
+
+    fn check_type(
+        &mut self,
+        class: &Class<'a>,
+        ienv: &mut IClassEnv<'a>,
+    ) -> TypeResult<'a, TypeId> {
+        let Class {
+            id, parent, span, ..
+        } = class;
+
+        parent
+            .check_inheritance()
+            .map_err(|kind| TypeError::new(kind, *span))?;
+
+        let span = *span;
+
+        let parent_id = ienv.get_type(parent).map(Some).ok_or(*parent);
+
+        let ty = Type::Class(id);
+
+        let res = ienv
+            .insert_class(ty, parent_id)
+            .map_err(|kind| TypeError::new(kind, span))?;
+
+        Ok(res)
+    }
+}
+
+#[derive(Debug)]
+pub struct MultiPassChecker<'a> {
+    classes: Vec<Class<'a>>,
+    checker: Option<Checker<'a>>,
+}
+
+impl<'a> MultiPassChecker<'a> {
+    pub fn from_input(input: &'a str) -> ParseResult<Self> {
         Self::new(Parser::from_input(input))
     }
 
-    pub fn new(parser: Parser<'a>) -> Self {
-        Self {
-            parser,
-            checker: Checker::new(),
-        }
-    }
-
-    pub fn check(mut self) -> SemanticResult<'a, (Vec<TypedClass<'a>>, ClassEnv<'a>)> {
-        let classes = (&mut self).collect::<SemanticResult<Vec<_>>>()?;
-        let main_class = self
-            .checker
-            .class_env
-            .get_type(&Type::Class("Main"))
-            .ok_or(SemanticError::new(
-                SemanticErrorKind::NoMainClass,
-                Span::default(),
-            ))?;
-        match self.checker.get_method(main_class, "main") {
-            Ok(method) if method.params().is_empty() => Ok((classes, self.checker.class_env)),
-            _ => Err(SemanticError::new(
-                SemanticErrorKind::NoMainMethod,
-                Span::default(),
-            )),
-        }
-    }
-}
-
-impl<'a> Iterator for SemanticChecker<'a> {
-    type Item = SemanticResult<'a, TypedClass<'a>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.parser.next().map(|class| {
-            self.checker
-                .check_class(class?)
-                .map_err(SemanticError::from)
+    pub fn new(parser: Parser<'a>) -> ParseResult<Self> {
+        Ok(Self {
+            classes: parser.collect::<Result<_, _>>()?,
+            checker: None,
         })
     }
 }
 
-impl<'a> From<Parser<'a>> for SemanticChecker<'a> {
-    fn from(parser: Parser<'a>) -> Self {
-        Self::new(parser)
+impl<'a> Iterator for MultiPassChecker<'a> {
+    type Item = SemanticResult<'a, TypedClass<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.checker {
+            Some(ref mut checker) => Some(
+                checker
+                    .check_class(self.classes.pop()?)
+                    .map_err(SemanticError::from),
+            ),
+            None => {
+                let checker = PrototypeChecker::new();
+                let env = checker.run(&mut self.classes).ok()?;
+                self.checker = Some(Checker::from_class_env(env));
+                self.next()
+            }
+        }
     }
 }
 
-impl<'a> From<Lexer<'a>> for SemanticChecker<'a> {
-    fn from(lexer: Lexer<'a>) -> Self {
-        Self::new(Parser::new(lexer))
+impl<'a> TypeChecker<'a> for MultiPassChecker<'a> {
+    fn check_all(mut self) -> SemanticResult<'a, (Vec<TypedClass<'a>>, ClassEnv<'a>)> {
+        let classes = (&mut self).collect::<Result<_, _>>()?;
+        let env = self.checker.unwrap().class_env;
+
+        env.get_type(&Type::Class("Main"))
+            .ok_or(SemanticError::new(
+                SemanticErrorKind::NoMainClass,
+                Span::default(),
+            ))
+            .and_then(|id| match env.get_method(id, "main") {
+                Ok(data) if data.params().is_empty() => Ok((classes, env)),
+                _ => Err(SemanticError::new(
+                    SemanticErrorKind::NoMainMethod,
+                    Span::default(),
+                )),
+            })
     }
 }

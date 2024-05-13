@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use crate::{
     span::Span,
-    token::TokenKind,
     types::{Type, TypeErrorKind, TypeId},
 };
 
@@ -64,6 +63,24 @@ impl BinOp {
             BinOp::Eq => "=",
         }
     }
+
+    pub fn to_ir_string(&self) -> &'static str {
+        match self {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::Mul => "mul",
+            BinOp::Div => "div",
+            BinOp::Lt => "lt",
+            BinOp::Le => "le",
+            BinOp::Eq => "eq",
+        }
+    }
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +105,28 @@ impl UnOp {
 
             UnOp::IsVoid => Ok(TypeId::BOOL),
         }
+    }
+
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            UnOp::Complement => "~",
+            UnOp::Not => "not",
+            UnOp::IsVoid => "isvoid",
+        }
+    }
+
+    pub fn to_ir_string(&self) -> &'static str {
+        match self {
+            UnOp::Complement => "neg",
+            UnOp::Not => "not",
+            UnOp::IsVoid => "isvoid",
+        }
+    }
+}
+
+impl std::fmt::Display for UnOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_string())
     }
 }
 
@@ -163,22 +202,6 @@ pub enum ExprKind<'a> {
 
     /// new type
     New(Type<'a>),
-}
-
-impl<'a> TryFrom<TokenKind<'a>> for ExprKind<'a> {
-    type Error = ();
-
-    fn try_from(value: TokenKind<'a>) -> Result<Self, Self::Error> {
-        match value {
-            TokenKind::Id("self") => Ok(ExprKind::SelfId),
-            TokenKind::Id(id) => Ok(ExprKind::Id(id)),
-            TokenKind::Int(int) => Ok(ExprKind::IntLit(int.parse().unwrap())),
-            TokenKind::String(s) => Ok(ExprKind::StringLit(s)),
-            TokenKind::KwTrue => Ok(ExprKind::BoolLit(true)),
-            TokenKind::KwFalse => Ok(ExprKind::BoolLit(false)),
-            _ => Err(()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,22 +333,6 @@ pub enum TypedExprKind<'a> {
 
     /// new type
     New(TypeId),
-}
-
-impl<'a> TryFrom<TokenKind<'a>> for TypedExprKind<'a> {
-    type Error = ();
-
-    fn try_from(value: TokenKind<'a>) -> Result<Self, Self::Error> {
-        match value {
-            TokenKind::Id("self") => Ok(TypedExprKind::SelfId),
-            TokenKind::Id(id) => Ok(TypedExprKind::Id(id)),
-            TokenKind::Int(int) => Ok(TypedExprKind::IntLit(int.parse().unwrap())),
-            TokenKind::String(s) => Ok(TypedExprKind::StringLit(s)),
-            TokenKind::KwTrue => Ok(TypedExprKind::BoolLit(true)),
-            TokenKind::KwFalse => Ok(TypedExprKind::BoolLit(false)),
-            _ => Err(()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,6 +472,10 @@ impl<'a> TypedMethod<'a> {
 
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    pub fn take_body(self) -> TypedExpr<'a> {
+        self.body
     }
 }
 

@@ -59,7 +59,7 @@ Object.copy:
     .globl String.New
 String.New:
     mov     rax, 0
-    lea     rdx, QWORD PTR [rip + _empty_string]
+    lea     rdx, QWORD PTR [rip + empty_string]
     ret
 
     .globl String.type_name
@@ -226,49 +226,19 @@ IO.out_string:
 # TODO: implement IO.out_int
     .globl IO.out_int
 IO.out_int:
-    push    rbp
-    mov     rbp, rsp
+    push    QWORD PTR [rsp + 24] # n
+    call    convert.itoa
+    add     rsp, 8
 
-    mov     rdi, QWORD PTR [rbp + 32] # n
-    lea     r10, BYTE PTR [rip + _io_out_int_buf] # buf
-    mov     r8, 0 # len
-    mov     r9, 20
-    mov     rcx, 10
-    mov     rsi, rdi
-    shr     rdi, 63 # check if n < 0
-    cmp     dil, 0
-    je      .IO.out_int_L1
-    neg     rsi
-.IO.out_int_L1:
-    mov     rax, rsi
-    cqo
-    idiv    rcx
-    # quotient in rax, remainder in rdx
-    add     rdx, 48 # n % 10 + '0'
-    mov     BYTE PTR [r10 + r9], dl
-    add     r8, 1
-    sub     r9, 1
-    mov     rsi, rax
-    cmp     rsi, 0
-    jne     .IO.out_int_L1
-
-    cmp     dil, 0
-    je      .IO.out_int_L2
-    mov     BYTE PTR [r10 + r9], 45 # '-'
-    add     r8, 1
-.IO.out_int_L2:
+    mov     rsi, rdx
+    mov     rdx, rax
     mov     rax, 1
     mov     rdi, 1
-    mov     r9, 21
-    sub     r9, r8
-    lea     rsi, BYTE PTR [r10 + r9]
-    mov     rdx, r8
     syscall
 
-    mov     rax, QWORD PTR [rbp + 16]
-    mov     rdx, QWORD PTR [rbp + 24]
+    mov     rax, QWORD PTR [rsp + 8]
+    mov     rdx, QWORD PTR [rsp + 16]
 
-    pop     rbp
     ret
 
 # TODO: implement IO.in_string
@@ -282,9 +252,25 @@ IO.in_string:
 # TODO: implement IO.in_int
     .globl IO.in_int
 IO.in_int:
-    push    0
-    call    Int.New
-    add     rsp, 8
+    mov     rax, 0
+    mov     rdi, 0
+    lea     rsi, BYTE PTR [rip + io_out_int_buf]
+    mov     rdx, 21
+    syscall
+
+    cmp     rax, 0 
+    jg      .IO.in_int_L1
+    mov     rax, 0
+    ret
+.IO.in_int_L1:
+
+    lea     rsi, BYTE PTR [rip + io_out_int_buf]
+    push    rsi
+    sub     rax, 1
+    push    rax
+    call    convert.atoi
+    add     rsp, 16
+
     ret
 
     .globl allocator.init
@@ -382,3 +368,72 @@ class.distance:
 .class.distance_L3:
     ret
 
+    .globl convert.itoa
+#   String convert.itoa(int64_t n)
+#   use string immediately after calling this function
+convert.itoa:
+    mov     rdi, QWORD PTR [rsp + 8] # n
+    lea     r10, BYTE PTR [rip + io_out_int_buf] # buf
+    mov     r8, 0 # len
+    mov     r9, 20
+    mov     rcx, 10
+    mov     rsi, rdi
+    shr     rdi, 63 # check if n < 0
+    cmp     dil, 0
+    je      .convert.itoa_L1
+    neg     rsi
+.convert.itoa_L1:
+    mov     rax, rsi
+    cqo
+    idiv    rcx
+    # quotient in rax, remainder in rdx
+    add     rdx, 48 # n % 10 + '0'
+    mov     BYTE PTR [r10 + r9], dl
+    add     r8, 1
+    sub     r9, 1
+    mov     rsi, rax
+    cmp     rsi, 0
+    jne     .convert.itoa_L1
+
+    cmp     dil, 0
+    je      .convert.itoa_L2
+    mov     BYTE PTR [r10 + r9], 45 # '-'
+    add     r8, 1
+.convert.itoa_L2:
+    mov     r9, 21
+    sub     r9, r8
+    lea     rdx, BYTE PTR [r10 + r9]
+    mov     rax, r8
+    ret
+
+    .globl convert.atoi
+#   int64_t convert.atoi(String s)
+convert.atoi:
+    mov     rax, 0 # n
+    mov     rdi, QWORD PTR [rsp + 8] # len
+    test    rdi, rdi
+    je      .convert.atoi_L3
+
+    mov     rsi, QWORD PTR [rsp + 16] # content
+    movzx   r9d, BYTE PTR [rsi]
+    cmp     r9, 45 # '-'
+    sete    r9b
+    mov     r8, 0 # i
+    add     r8, r9
+    mov     rdx, 10
+#   for (size_t i = 0; i < len; i++)
+.convert.atoi_L1:
+    cmp     r8, rdi
+    jae     .convert.atoi_L2
+    movzx   ecx, BYTE PTR [rsi + r8]
+    sub     rcx, 48 # s[i] - '0'
+    imul    rax, rdx
+    add     rax, rcx
+    add     r8, 1
+    jmp     .convert.atoi_L1
+.convert.atoi_L2:
+    test    r9, r9
+    je      .convert.atoi_L3
+    neg     rax
+.convert.atoi_L3:
+    ret

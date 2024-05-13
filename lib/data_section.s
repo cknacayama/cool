@@ -70,18 +70,18 @@ Bool.Typename:
 Bool.Typenamelen:
     .quad 4
 
-_empty_string:
+empty_string:
     .string ""
     .align 8
-_empty_stringlen:
+empty_string_len:
     .quad 0
 
-_io_out_int_buf_size:
+io_out_int_buf_size:
     .quad 21
 
     .bss 
 heap_pos:
     .quad 0
-_io_out_int_buf:
+io_out_int_buf:
     .skip 21
 
