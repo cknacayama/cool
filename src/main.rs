@@ -60,8 +60,12 @@ fn main() {
         let preds = method.predecessors();
         let idoms = method.idoms(&preds);
         let dom_front = method.dom_frontiers(&preds, &idoms);
-        for (i, dom) in dom_front.iter().enumerate() {
-            println!("{}: {:?}", i, dom);
+        let phis = method.phi_positions(&dom_front);
+        for block in method.block_ids() {
+            println!("{}: idoms: {:?}", block, idoms[block]);
+            println!("    dom_front: {:?}", dom_front[block]);
+            println!("    phis: {:?}", phis[block]);
+            println!("    preds: {:?}", preds[block]);
         }
     }
 }

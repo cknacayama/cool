@@ -29,7 +29,7 @@ pub enum InstrKind<'a> {
     AssignToObj(Id, TypeId, Id),
     AssignDispatch(Id, Id, &'a str, usize),
     AssignStaticDispatch(Id, Id, TypeId, &'a str, usize),
-    Phi(Id, Vec<(Id, BlockId)>),
+    Phi(Id, Vec<Id>),
     PushArg(Id),
     PopArgs(usize),
 
@@ -86,7 +86,7 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
             InstrKind::Phi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
                 for (i, val) in vals.iter().enumerate() {
-                    write!(f, "{}", val.0)?;
+                    write!(f, "{}", val)?;
                     if i != vals.len() - 1 {
                         write!(f, ", ")?;
                     }
@@ -106,12 +106,21 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
 pub struct Instr<'a> {
     pub kind: InstrKind<'a>,
     pub span: Span,
-    pub ty:   Option<TypeId>,
+    pub ty:   TypeId,
 }
 
 impl<'a> Instr<'a> {
-    pub fn new(kind: InstrKind<'a>, span: Span, ty: Option<TypeId>) -> Self {
+    pub fn new(kind: InstrKind<'a>, span: Span, ty: TypeId) -> Self {
         Self { kind, span, ty }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstrId(pub usize);
+
+impl Key for InstrId {
+    fn to_index(self) -> usize {
+        self.0
     }
 }
 
