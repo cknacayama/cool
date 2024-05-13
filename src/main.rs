@@ -60,8 +60,8 @@ fn main() {
         let preds = method.predecessors();
         let idoms = method.idoms(&preds);
         let dom_front = method.dom_frontiers(&preds, &idoms);
-        for dom in dom_front {
-            println!("{:?}", dom);
+        for (i, dom) in dom_front.iter().enumerate() {
+            println!("{}: {:?}", i, dom);
         }
     }
 }

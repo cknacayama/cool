@@ -84,14 +84,14 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
             }
             InstrKind::AssignToObj(id, ty, val) => write!(f, "    {} = cast {}, {}", id, ty, val),
             InstrKind::Phi(id, vals) => {
-                write!(f, "    {} = phi (", id)?;
+                write!(f, "    {} = phi ", id)?;
                 for (i, val) in vals.iter().enumerate() {
-                    write!(f, "{:?}", val)?;
+                    write!(f, "{}", val.0)?;
                     if i != vals.len() - 1 {
                         write!(f, ", ")?;
                     }
                 }
-                write!(f, ")")
+                Ok(())
             }
             InstrKind::PushArg(id) => write!(f, "    push_arg {}", id),
             InstrKind::PopArgs(subs) => write!(f, "    pop_args {}", subs),

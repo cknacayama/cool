@@ -148,7 +148,6 @@ impl<'a> Method<'a> {
         let last = self.cur_block;
         self.cur_block = block;
         self.push_instr(Instr::new(InstrKind::Label(block), span, None));
-        self.begin_scope();
         last
     }
 
@@ -332,18 +331,15 @@ impl<'a> Method<'a> {
     ) -> IndexVec<BlockId, Vec<BlockId>> {
         let mut frontiers = index_vec![vec![]; self.blocks.len()];
 
-        for bb in self.block_ids() {
-            let preds = &preds[bb];
-            if preds.len() < 2 {
+        for bb in self.block_ids().filter(|b| preds[*b].len() >= 2) {
+            let Some(idom) = idoms.get(bb).copied() else {
                 continue;
-            }
+            };
 
-            let Some(&idom) = idoms.get(bb) else { continue };
-
-            for pred in preds
+            for pred in preds[bb]
                 .iter()
                 .copied()
-                .filter(|pred| pred.is_entry() || pred.ne(&idoms[*pred]))
+                .filter(|&pred| pred.is_entry() || pred != idoms[pred])
             {
                 let mut at = pred;
                 while at != idom {
@@ -421,7 +417,15 @@ impl<'a> IrBuilder<'a> {
         self.cur_method_mut().push_instr(instr)
     }
 
-    fn new_method(&mut self, id: &'a str, params: &[TypedFormal<'a>]) {
+    fn begin_scope(&mut self) {
+        self.cur_method_mut().begin_scope()
+    }
+
+    fn end_scope(&mut self) -> HashMap<&'a str, Id> {
+        self.cur_method_mut().end_scope()
+    }
+
+    fn begin_method(&mut self, id: &'a str, params: &[TypedFormal<'a>]) {
         let mut method = Method::new(self.cur_class, id);
         let class_attrs = self.env.get_class(self.cur_class).unwrap().attrs();
         method.begin_scope();
@@ -432,6 +436,10 @@ impl<'a> IrBuilder<'a> {
             .chain(params.iter().map(|f| f.id));
         method.extend_locals(iter);
         self.methods.push(method)
+    }
+
+    fn end_method(&mut self) -> HashMap<&'a str, Id> {
+        self.end_scope()
     }
 
     fn new_tmp(&mut self) -> Id {
@@ -467,8 +475,12 @@ impl<'a> IrBuilder<'a> {
         }
     }
 
-    fn build_method(&mut self, type_name: &'a str, method: TypedMethod<'a>) {
-        self.new_method(method.id(), method.params());
+    fn build_method(
+        &mut self,
+        type_name: &'a str,
+        method: TypedMethod<'a>,
+    ) -> HashMap<&'a str, Id> {
+        self.begin_method(method.id(), method.params());
         let span = method.span;
         let kind = InstrKind::Method(type_name, method.id());
         let instr = Instr::new(kind, span, None);
@@ -480,6 +492,7 @@ impl<'a> IrBuilder<'a> {
         let kind = InstrKind::EndMethod(body);
         let instr = Instr::new(kind, span, Some(ty));
         self.push_instr(instr);
+        self.end_method()
     }
 
     fn build_maybe_cast(
@@ -582,6 +595,7 @@ impl<'a> IrBuilder<'a> {
                 self.build_static_dispatch(*expr, ty, id, args, span, ty)
             }
             TEK::Let(formals, body) => {
+                self.begin_scope();
                 for (formal, expr) in formals.into_vec() {
                     let TypedFormal { id, ty, span } = formal;
                     match expr {
@@ -608,15 +622,15 @@ impl<'a> IrBuilder<'a> {
                     }
                 }
                 let body = self.build_expr(*body);
+                self.end_scope();
                 body
             }
             TEK::Block(exprs) => {
                 let exprs = exprs.into_vec().into_iter();
-                let block = self.new_block();
-                self.begin_block(block, span);
-                exprs.fold((Id::Tmp(0), TypeId::SelfType), |_, expr| {
+                let res = exprs.fold((Id::Tmp(0), TypeId::SelfType), |_, expr| {
                     self.build_expr(expr)
-                })
+                });
+                res
             }
             TEK::If(cond, then, els) => self.build_if(*cond, *then, *els, ty, span),
             TEK::While(cond, body) => self.build_while(*cond, *body, span),
@@ -645,6 +659,7 @@ impl<'a> IrBuilder<'a> {
         let cond_block = self.new_block();
         let body_block = self.new_block();
         let end_block = self.new_block();
+
         let _ = self.begin_block(cond_block, cond.span);
         let (cond, _) = self.build_expr(cond);
         let jmp_0_kind = InstrKind::JmpIfZero(cond, end_block, body_block);
