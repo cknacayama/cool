@@ -1,4 +1,8 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Debug,
+    rc::Rc,
+};
 
 use crate::{
     ast::*,
@@ -79,6 +83,16 @@ impl<'a> Block<'a> {
     pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr<'a>> {
         self.instrs.iter_mut()
     }
+
+    pub fn phis_args(&mut self) -> Vec<&mut Vec<Id>> {
+        let mut phis = vec![];
+        for instr in self.instrs.iter_mut() {
+            if let InstrKind::Phi(_, args) = &mut instr.kind {
+                phis.push(args);
+            }
+        }
+        phis
+    }
 }
 
 #[derive(Debug)]
@@ -127,6 +141,12 @@ impl<'a> Method<'a> {
         self.blocks
             .iter()
             .flat_map(|(_, b)| b.instrs.iter().filter(|i| !i.kind.is_nop()))
+    }
+
+    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr<'a>> {
+        self.blocks
+            .iter_mut()
+            .flat_map(|(_, b)| b.instrs.iter_mut().filter(|i| !i.kind.is_nop()))
     }
 
     pub fn blocks(&self) -> &[Block] {
@@ -220,23 +240,31 @@ impl<'a> Method<'a> {
     }
 
     fn set_params(&mut self, locals: impl Iterator<Item = (&'a str, TypeId)> + Clone, span: Span) {
+        let tmp = self.new_tmp();
+        let kind = InstrKind::Param(self.class, tmp);
+        let instr = Instr::new(kind, span, self.class);
+        self.push_instr(instr);
+
         let id = self.new_local("self", self.class);
         let kind = InstrKind::Local(self.class, id);
         let instr = Instr::new(kind, span, TypeId::SelfType);
         self.push_instr(instr);
 
-        let tmp = self.new_tmp();
         let kind = InstrKind::Store(id, self.class, tmp);
         let instr = Instr::new(kind, span, TypeId::SelfType);
         self.push_instr(instr);
 
         for (name, ty) in locals {
+            let tmp = self.new_tmp();
+            let kind = InstrKind::Param(ty, tmp);
+            let instr = Instr::new(kind, span, ty);
+            self.push_instr(instr);
+
             let id = self.new_local(name, ty);
             let kind = InstrKind::Local(ty, id);
             let instr = Instr::new(kind, span, TypeId::SelfType);
             self.push_instr(instr);
 
-            let tmp = self.new_tmp();
             let kind = InstrKind::Store(id, ty, tmp);
             let instr = Instr::new(kind, span, TypeId::SelfType);
             self.push_instr(instr);
@@ -277,6 +305,7 @@ pub struct IrBuilder<'a> {
     cur_class: TypeId,
     env:       ClassEnv<'a>,
     methods:   Vec<Method<'a>>,
+    strings:   HashSet<Rc<str>>,
 }
 
 impl<'a> IrBuilder<'a> {
@@ -285,7 +314,12 @@ impl<'a> IrBuilder<'a> {
             cur_class: TypeId::SelfType,
             env,
             methods: Vec::new(),
+            strings: HashSet::from([Rc::from("")]),
         }
+    }
+
+    pub fn strings(&self) -> &HashSet<Rc<str>> {
+        &self.strings
     }
 
     pub fn methods(&self) -> &[Method<'a>] {
@@ -357,6 +391,15 @@ impl<'a> IrBuilder<'a> {
         self.cur_method_mut().push_local(name, ty, span)
     }
 
+    fn intern_string(&mut self, s: &str) -> Rc<str> {
+        if let Some(s) = self.strings.get(s) {
+            return s.clone();
+        }
+        let s: Rc<str> = Rc::from(s);
+        self.strings.insert(s.clone());
+        s
+    }
+
     pub fn build_class(&mut self, class: TypedClass<'a>) {
         let TypedClass {
             type_id, methods, ..
@@ -385,8 +428,8 @@ impl<'a> IrBuilder<'a> {
         let kind = InstrKind::Method(
             self.cur_class,
             id,
-            instr_params.into_boxed_slice(),
             typed_method.return_ty(),
+            instr_params.len(),
         );
         let instr = Instr::new(kind, span, TypeId::SelfType);
         method.push_instr(instr);
@@ -441,6 +484,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::StringLit(s) => {
                 let tmp = self.new_tmp();
+                let s = self.intern_string(&s);
                 let kind = InstrKind::AssignStr(tmp, s);
                 let instr = Instr::new(kind, span, ty);
                 self.push_instr(instr);
@@ -524,7 +568,7 @@ impl<'a> IrBuilder<'a> {
                         None => {
                             let id = self.push_local(id, ty, span);
                             let tmp = self.new_tmp();
-                            let kind = InstrKind::AssignDefault(tmp);
+                            let kind = InstrKind::AssignDefault(tmp, ty);
                             let instr = Instr::new(kind, span, ty);
                             self.push_instr(instr);
                             let kind = InstrKind::Store(id, ty, tmp);
@@ -579,7 +623,7 @@ impl<'a> IrBuilder<'a> {
 
         let end_block = self.begin_block(span);
         let tmp = self.new_tmp();
-        let kind = InstrKind::AssignDefault(tmp);
+        let kind = InstrKind::AssignDefault(tmp, TypeId::OBJECT);
         let instr = Instr::new(kind, span, TypeId::OBJECT);
         self.push_instr(instr);
         self.patch_jmp_cond(cond_block, body_block, end_block);

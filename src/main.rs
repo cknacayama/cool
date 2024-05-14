@@ -52,8 +52,11 @@ fn main() {
         println!("{}", instr.kind);
     }
 
+    let default_string = builder.strings().get("").unwrap().clone();
     for method in builder.methods_mut() {
         method.mem2reg();
+        method.const_propagation(default_string.clone());
+        method.dead_code_elimination();
     }
 
     for instr in builder.instrs() {
