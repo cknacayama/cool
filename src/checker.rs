@@ -10,14 +10,11 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Checker<'a> {
-    object_envs:     Vec<ObjectEnv<'a>>,
-    is_in_method:    bool,
-    env_ready:       bool,
-    cur_class:       TypeId,
-    cur_stack_size:  usize,
-    cur_init_size:   usize,
-    cur_attr_offset: usize,
-    class_env:       ClassEnv<'a>,
+    object_envs:  Vec<ObjectEnv<'a>>,
+    is_in_method: bool,
+    env_ready:    bool,
+    cur_class:    TypeId,
+    class_env:    ClassEnv<'a>,
 }
 
 impl<'a> Default for Checker<'a> {
@@ -29,27 +26,21 @@ impl<'a> Default for Checker<'a> {
 impl<'a> Checker<'a> {
     pub fn new() -> Self {
         Self {
-            object_envs:     vec![],
-            cur_stack_size:  0,
-            cur_init_size:   0,
-            cur_attr_offset: 0,
-            is_in_method:    false,
-            env_ready:       false,
-            class_env:       ClassEnv::new(),
-            cur_class:       TypeId::SelfType,
+            object_envs:  vec![],
+            is_in_method: false,
+            env_ready:    false,
+            class_env:    ClassEnv::new(),
+            cur_class:    TypeId::SelfType,
         }
     }
 
     fn from_class_env(env: ClassEnv<'a>) -> Self {
         Self {
-            object_envs:     vec![],
-            cur_stack_size:  0,
-            cur_init_size:   0,
-            cur_attr_offset: 0,
-            is_in_method:    false,
-            env_ready:       true,
-            class_env:       env,
-            cur_class:       TypeId::SelfType,
+            object_envs:  vec![],
+            is_in_method: false,
+            env_ready:    true,
+            class_env:    env,
+            cur_class:    TypeId::SelfType,
         }
     }
 
@@ -66,11 +57,7 @@ impl<'a> Checker<'a> {
             .iter()
             .rev()
             .find_map(|env| env.get(id))
-            .or_else(|| {
-                self.get_attribute(self.cur_class, id)
-                    .map(|(ty, _)| ty)
-                    .ok()
-            })
+            .or_else(|| self.get_attribute(self.cur_class, id).ok())
     }
 
     fn get_type(&self, ty: &Type<'a>) -> Option<TypeId> {
@@ -119,25 +106,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn get_attribute(
-        &self,
-        ty: TypeId,
-        attr: &'a str,
-    ) -> Result<(TypeId, usize), TypeErrorKind<'a>> {
+    fn get_attribute(&self, ty: TypeId, attr: &'a str) -> Result<TypeId, TypeErrorKind<'a>> {
         self.class_env.get_attribute(ty, attr)
     }
 
     fn insert_attribute(
         &mut self,
         ty: TypeId,
-        offset: usize,
         attr: &'a str,
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
         if self.env_ready {
             Ok(())
         } else {
-            self.class_env.insert_attribute(ty, offset, attr, data)
+            self.class_env.insert_attribute(ty, attr, data)
         }
     }
 
@@ -159,9 +141,6 @@ impl<'a> Checker<'a> {
 
         let parent_data = self.class_env.get_class(parent).unwrap();
 
-        self.cur_attr_offset = parent_data.attrs_size();
-        self.cur_init_size = 8;
-
         let mut vtable = parent_data.vtable().to_vec();
         vtable[0].0 = parent_data.id();
         vtable[1].0 = id;
@@ -171,7 +150,6 @@ impl<'a> Checker<'a> {
             id,
             Some(parent),
             parent_data.attrs().clone(),
-            self.cur_attr_offset,
             HashMap::new(),
             vtable,
         )
@@ -220,15 +198,7 @@ impl<'a> Checker<'a> {
 
         self.end_scope();
 
-        Ok(TypedClass::new(
-            id,
-            ty,
-            parent,
-            methods,
-            attrs,
-            self.cur_init_size,
-            span,
-        ))
+        Ok(TypedClass::new(id, ty, parent, methods, attrs, span))
     }
 
     fn check_attribute(
@@ -250,12 +220,10 @@ impl<'a> Checker<'a> {
                     .map(|_| init)
             })
             .transpose()?;
-        let offset = attr_ty.align_offset(self.cur_attr_offset);
-        self.cur_attr_offset = offset + attr_ty.size_of();
-        self.insert_attribute(ty, offset, id, attr_ty)
+        self.insert_attribute(ty, id, attr_ty)
             .map_err(|kind| TypeError::new(kind, span))?;
 
-        Ok(TypedAttribute::new(id, attr_ty, init, offset, span))
+        Ok(TypedAttribute::new(id, attr_ty, init, span))
     }
 
     fn check_method(
@@ -283,8 +251,6 @@ impl<'a> Checker<'a> {
             .map_err(|kind| TypeError::new(kind, span))?;
         self.begin_scope();
 
-        self.cur_stack_size = 0;
-
         let iter = params.into_vec().into_iter();
         let params = iter
             .map(|param| {
@@ -307,14 +273,7 @@ impl<'a> Checker<'a> {
 
         self.is_in_method = false;
 
-        Ok(TypedMethod::new(
-            id,
-            params,
-            return_ty,
-            body,
-            self.cur_stack_size,
-            span,
-        ))
+        Ok(TypedMethod::new(id, params, return_ty, body, span))
     }
 
     fn check_expr(&mut self, expr: Expr<'a>) -> TypeResult<'a, TypedExpr<'a>> {
@@ -506,11 +465,6 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        if self.is_in_method {
-            self.cur_stack_size = ty.align_size(self.cur_stack_size);
-        } else {
-            self.cur_init_size = ty.align_size(self.cur_init_size);
-        }
         self.insert_object(id, ty);
         let expr = self.check_expr(expr)?;
         self.end_scope();
@@ -569,11 +523,6 @@ impl<'a> Checker<'a> {
         let ty = self
             .get_type_or_err(&ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        if self.is_in_method {
-            self.cur_stack_size = ty.align_size(self.cur_stack_size);
-        } else {
-            self.cur_init_size = ty.align_size(self.cur_init_size);
-        }
         self.insert_object(id, ty);
         let expr = expr
             .map(|expr| {
@@ -824,17 +773,15 @@ pub trait TypeChecker<'a>: Iterator<Item = SemanticResult<'a, TypedClass<'a>>> {
 
 #[derive(Debug)]
 struct PrototypeChecker<'a> {
-    env:             Option<ClassEnv<'a>>,
-    cur_class:       TypeId,
-    cur_attr_offset: usize,
+    env:       Option<ClassEnv<'a>>,
+    cur_class: TypeId,
 }
 
 impl<'a> PrototypeChecker<'a> {
     fn new() -> Self {
         Self {
-            env:             None,
-            cur_class:       TypeId::SelfType,
-            cur_attr_offset: 0,
+            env:       None,
+            cur_class: TypeId::SelfType,
         }
     }
 
@@ -880,8 +827,6 @@ impl<'a> PrototypeChecker<'a> {
             .and_then(|env| env.get_class(parent_id).ok())
             .unwrap();
 
-        self.cur_attr_offset = parent_data.attrs_size();
-
         let mut vtable = parent_data.vtable().to_vec();
 
         vtable[0].0 = parent_data.id();
@@ -892,7 +837,6 @@ impl<'a> PrototypeChecker<'a> {
             id,
             Some(parent_id),
             parent_data.attrs().clone(),
-            self.cur_attr_offset,
             HashMap::new(),
             vtable,
         )
@@ -940,12 +884,10 @@ impl<'a> PrototypeChecker<'a> {
         let attr_ty = self
             .get_type_or_err(attr_ty)
             .map_err(|kind| TypeError::new(kind, span))?;
-        let offset = attr_ty.align_offset(self.cur_attr_offset);
-        self.cur_attr_offset = offset + attr_ty.size_of();
         self.env
             .as_mut()
             .unwrap()
-            .insert_attribute(ty, offset, id, attr_ty)
+            .insert_attribute(ty, id, attr_ty)
             .map_err(|kind| TypeError::new(kind, span))?;
 
         Ok(())

@@ -394,13 +394,12 @@ impl<'a> TypedExpr<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedClass<'a> {
-    pub id:        &'a str,
-    pub type_id:   TypeId,
-    pub parent:    TypeId,
-    pub methods:   Box<[TypedMethod<'a>]>,
-    pub attrs:     Box<[TypedAttribute<'a>]>,
-    pub init_size: usize,
-    pub span:      Span,
+    pub id:      &'a str,
+    pub type_id: TypeId,
+    pub parent:  TypeId,
+    pub methods: Box<[TypedMethod<'a>]>,
+    pub attrs:   Box<[TypedAttribute<'a>]>,
+    pub span:    Span,
 }
 
 impl<'a> TypedClass<'a> {
@@ -410,7 +409,6 @@ impl<'a> TypedClass<'a> {
         parent: TypeId,
         methods: Box<[TypedMethod<'a>]>,
         attrs: Box<[TypedAttribute<'a>]>,
-        init_size: usize,
         span: Span,
     ) -> Self {
         Self {
@@ -419,7 +417,6 @@ impl<'a> TypedClass<'a> {
             parent,
             methods,
             attrs,
-            init_size,
             span,
         }
     }
@@ -431,7 +428,6 @@ pub struct TypedMethod<'a> {
     params:    Box<[TypedFormal<'a>]>,
     return_ty: TypeId,
     body:      TypedExpr<'a>,
-    size:      usize,
     pub span:  Span,
 }
 
@@ -441,7 +437,6 @@ impl<'a> TypedMethod<'a> {
         params: Box<[TypedFormal<'a>]>,
         return_ty: TypeId,
         body: TypedExpr<'a>,
-        size: usize,
         span: Span,
     ) -> Self {
         Self {
@@ -449,7 +444,6 @@ impl<'a> TypedMethod<'a> {
             params,
             return_ty,
             body,
-            size,
             span,
         }
     }
@@ -470,10 +464,6 @@ impl<'a> TypedMethod<'a> {
         &self.body
     }
 
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
     pub fn take_body(self) -> TypedExpr<'a> {
         self.body
     }
@@ -481,28 +471,15 @@ impl<'a> TypedMethod<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedAttribute<'a> {
-    id:     &'a str,
-    ty:     TypeId,
-    init:   Option<TypedExpr<'a>>,
-    offset: usize,
-    span:   Span,
+    id:   &'a str,
+    ty:   TypeId,
+    init: Option<TypedExpr<'a>>,
+    span: Span,
 }
 
 impl<'a> TypedAttribute<'a> {
-    pub fn new(
-        id: &'a str,
-        ty: TypeId,
-        init: Option<TypedExpr<'a>>,
-        offset: usize,
-        span: Span,
-    ) -> Self {
-        Self {
-            id,
-            ty,
-            init,
-            offset,
-            span,
-        }
+    pub fn new(id: &'a str, ty: TypeId, init: Option<TypedExpr<'a>>, span: Span) -> Self {
+        Self { id, ty, init, span }
     }
 
     pub fn id(&self) -> &'a str {
@@ -515,10 +492,6 @@ impl<'a> TypedAttribute<'a> {
 
     pub fn init(&self) -> Option<&TypedExpr<'a>> {
         self.init.as_ref()
-    }
-
-    pub fn offset(&self) -> usize {
-        self.offset
     }
 
     pub fn span(&self) -> Span {

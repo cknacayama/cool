@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 pub trait Key: Copy {
     fn to_index(self) -> usize;
+    fn from_index(index: usize) -> Self;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,10 @@ impl<K: Key, V> IndexVec<K, V> {
         self.values.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     pub fn push(&mut self, value: V) {
         self.values.push(value);
     }
@@ -53,12 +58,18 @@ impl<K: Key, V> IndexVec<K, V> {
         self.values.retain_mut(f)
     }
 
-    pub fn iter(&self) -> core::slice::Iter<V> {
-        self.values.iter()
+    pub fn iter(&self) -> Iter<K, V> {
+        Iter {
+            values:  self.values.iter(),
+            current: K::from_index(0),
+        }
     }
 
-    pub fn iter_mut(&mut self) -> core::slice::IterMut<V> {
-        self.values.iter_mut()
+    pub fn iter_mut(&mut self) -> IterMut<K, V> {
+        IterMut {
+            values:  self.values.iter_mut(),
+            current: K::from_index(0),
+        }
     }
 
     pub fn inner(&self) -> &Vec<V> {
@@ -72,14 +83,33 @@ impl<K: Key, V> IndexVec<K, V> {
     pub fn into_inner(self) -> Vec<V> {
         self.values
     }
+
+    pub fn first(&self) -> Option<&V> {
+        self.values.first()
+    }
+
+    pub fn last(&self) -> Option<&V> {
+        self.values.last()
+    }
+
+    pub fn first_mut(&mut self) -> Option<&mut V> {
+        self.values.first_mut()
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut V> {
+        self.values.last_mut()
+    }
 }
 
-impl<'a, K: Key, V> IntoIterator for IndexVec<K, V> {
-    type Item = V;
-    type IntoIter = std::vec::IntoIter<V>;
+impl<K: Key, V> IntoIterator for IndexVec<K, V> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.values.into_iter()
+        IntoIter {
+            values:  self.values.into_iter(),
+            current: K::from_index(0),
+        }
     }
 }
 
@@ -141,11 +171,19 @@ impl Key for usize {
     fn to_index(self) -> usize {
         self
     }
+
+    fn from_index(index: usize) -> Self {
+        index
+    }
 }
 
 impl Key for u32 {
     fn to_index(self) -> usize {
         self as usize
+    }
+
+    fn from_index(index: usize) -> Self {
+        index as u32
     }
 }
 
@@ -161,3 +199,57 @@ macro_rules! index_vec {
     );
 }
 pub(crate) use index_vec;
+
+#[derive(Debug, Clone)]
+pub struct Iter<'a, K: Key, V> {
+    values:  core::slice::Iter<'a, V>,
+    current: K,
+}
+
+impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
+    type Item = (K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.values.next().map(|value| {
+            let current = self.current;
+            self.current = K::from_index(current.to_index() + 1);
+            (current, value)
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct IterMut<'a, K: Key, V> {
+    values:  core::slice::IterMut<'a, V>,
+    current: K,
+}
+
+impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
+    type Item = (K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.values.next().map(|value| {
+            let current = self.current;
+            self.current = K::from_index(current.to_index() + 1);
+            (current, value)
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct IntoIter<K: Key, V> {
+    values:  std::vec::IntoIter<V>,
+    current: K,
+}
+
+impl<K: Key, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.values.next().map(|value| {
+            let current = self.current;
+            self.current = K::from_index(current.to_index() + 1);
+            (current, value)
+        })
+    }
+}

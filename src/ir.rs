@@ -1,3 +1,4 @@
+use core::panic;
 use std::borrow::Cow;
 
 use crate::{
@@ -10,59 +11,70 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstrKind<'a> {
-    Method(&'a str, &'a str),
-    BeginMethod(usize),
-    EndMethod(Id),
+    Nop,
+
+    Method(TypeId, &'a str, Box<[TypeId]>, TypeId),
+    Return(Id),
     Label(BlockId),
     Jmp(BlockId),
-    // (src, on_zero, on_non_zero)
-    JmpIfZero(Id, BlockId, BlockId),
+    /// (src, on_true, on_false)
+    JmpCond(Id, BlockId, BlockId),
     Id(Id),
     Assign(Id, Id),
     AssignDefault(Id),
-    AssignNew(Id, TypeId),
     AssignInt(Id, i64),
     AssignBool(Id, bool),
     AssignStr(Id, Cow<'a, str>),
     AssignBin(BinOp, Id, Id, Id),
     AssignUn(UnOp, Id, Id),
     AssignToObj(Id, TypeId, Id),
-    AssignDispatch(Id, Id, &'a str, usize),
-    AssignStaticDispatch(Id, Id, TypeId, &'a str, usize),
+    AssignDispatch(Id, Id, &'a str, Box<[(TypeId, Id)]>),
+    AssignStaticDispatch(Id, Id, TypeId, &'a str, Box<[(TypeId, Id)]>),
     Phi(Id, Vec<Id>),
-    PushArg(Id),
-    PopArgs(usize),
 
     // before mem2reg
-    Local(Id, usize),
-    AssignLoad(Id, Id),
-    Store(Id, Id),
+    Local(TypeId, Id),
+    AssignLoad(Id, TypeId, Id),
+    Store(Id, TypeId, Id),
+    Attr(TypeId, Id),
 }
 
 impl<'a> InstrKind<'a> {
-    pub fn block_end(&self) -> bool {
+    pub fn is_block_end(&self) -> bool {
         matches!(
             self,
-            Self::EndMethod(_) | Self::Jmp(_) | Self::JmpIfZero(_, _, _)
+            Self::Return(_) | Self::Jmp(_) | Self::JmpCond(_, _, _)
         )
+    }
+
+    pub fn is_nop(&self) -> bool {
+        matches!(self, Self::Nop)
     }
 }
 
 impl<'a> std::fmt::Display for InstrKind<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InstrKind::Method(ty, name) => write!(f, "{}.{}:", ty, name),
-            InstrKind::BeginMethod(subs) => write!(f, "    begin_method {}", subs),
-            InstrKind::EndMethod(id) => write!(f, "    end_method {}", id),
+            InstrKind::Nop => write!(f, "    nop"),
+            InstrKind::Method(ty, name, params, ret_ty) => {
+                write!(f, "method {} {}.{}(", ret_ty, ty, name)?;
+                for (i, p) in params.iter().enumerate() {
+                    write!(f, "{} $t{}", p, i)?;
+                    if i != params.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ") {{")
+            }
+            InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),
             InstrKind::Label(subs) => write!(f, "block{}:", subs),
             InstrKind::Jmp(subs) => write!(f, "    jmp block{}", subs),
-            InstrKind::JmpIfZero(id, on_zero, on_non_zero) => {
-                write!(f, "    {} ? block{} : block{}", id, on_non_zero, on_zero)
+            InstrKind::JmpCond(id, on_true, on_false) => {
+                write!(f, "    {} ? block{} : block{}", id, on_true, on_false)
             }
             InstrKind::Id(id) => write!(f, "{}", id),
             InstrKind::Assign(id, val) => write!(f, "    {} = {}", id, val),
             InstrKind::AssignDefault(id) => write!(f, "    {} = default", id),
-            InstrKind::AssignNew(id, ty) => write!(f, "    {} = new {}", id, ty),
             InstrKind::AssignInt(id, val) => write!(f, "    {} = {}", id, val),
             InstrKind::AssignBool(id, val) => write!(f, "    {} = {}", id, val),
             InstrKind::AssignStr(id, val) => write!(f, "    {} = {:?}", id, val),
@@ -72,17 +84,29 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
             InstrKind::AssignUn(op, id, val) => {
                 write!(f, "    {} = {} {}", id, op.to_ir_string(), val)
             }
-            InstrKind::AssignDispatch(id, obj, name, arg_count) => {
-                write!(f, "    {} = dispatch {}, {}.{}()", id, arg_count, obj, name)
+            InstrKind::AssignDispatch(id, obj, name, args) => {
+                write!(f, "    {} = dispatch {}.{}(", id, obj, name)?;
+                for (i, arg) in args.iter().enumerate() {
+                    write!(f, "{} {}", arg.0, arg.1)?;
+                    if i != args.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
             }
-            InstrKind::AssignStaticDispatch(id, obj, ty, name, arg_count) => {
-                write!(
-                    f,
-                    "    {} = dispatch {}, {}@{}.{}()",
-                    arg_count, id, obj, ty, name
-                )
+            InstrKind::AssignStaticDispatch(id, obj, ty, name, args) => {
+                write!(f, "    {} = dispatch {} @ {}.{}(", id, obj, ty, name).unwrap();
+                for (i, arg) in args.iter().enumerate() {
+                    write!(f, "{} {}", arg.0, arg.1)?;
+                    if i != args.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
             }
-            InstrKind::AssignToObj(id, ty, val) => write!(f, "    {} = cast {}, {}", id, ty, val),
+            InstrKind::AssignToObj(id, ty, val) => {
+                write!(f, "    {} = cast {}, {}", id, ty, val)
+            }
             InstrKind::Phi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
                 for (i, val) in vals.iter().enumerate() {
@@ -93,11 +117,10 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
                 }
                 Ok(())
             }
-            InstrKind::PushArg(id) => write!(f, "    push_arg {}", id),
-            InstrKind::PopArgs(subs) => write!(f, "    pop_args {}", subs),
-            InstrKind::Local(name, size) => write!(f, "    local {}, {}", name, size),
-            InstrKind::AssignLoad(id, name) => write!(f, "    {} = load {}", id, name),
-            InstrKind::Store(name, id) => write!(f, "    store {}, {}", name, id),
+            InstrKind::Local(ty, name) => write!(f, "    local {} {}", ty, name),
+            InstrKind::AssignLoad(id, ty, name) => write!(f, "    {} = load {} {}", id, ty, name),
+            InstrKind::Store(name, ty, id) => write!(f, "    store {}, {} {}", name, ty, id),
+            InstrKind::Attr(ty, name) => write!(f, "    attr {} {}", ty, name),
         }
     }
 }
@@ -116,41 +139,65 @@ impl<'a> Instr<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InstrId(pub usize);
-
-impl Key for InstrId {
-    fn to_index(self) -> usize {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Id {
     Tmp(usize),
     Local(usize),
+    Renamed(usize),
+    Ptr(usize),
 }
 
 impl Id {
     pub const LOCAL_SELF: Self = Self::Local(0);
 
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
+    pub fn is_tmp(&self) -> bool {
+        matches!(self, Self::Tmp(_))
+    }
+
     pub fn get_subs(&self) -> usize {
         match self {
-            Self::Tmp(subs) | Self::Local(subs) => *subs,
+            Self::Tmp(subs) | Self::Local(subs) | Self::Renamed(subs) | Self::Ptr(subs) => *subs,
         }
+    }
+
+    pub fn new(&self) -> Self {
+        match self {
+            Self::Tmp(index) => Self::Tmp(index + 1),
+            Self::Local(index) => Self::Local(index + 1),
+            Self::Renamed(index) => Self::Renamed(index + 1),
+            Self::Ptr(index) => Self::Ptr(index + 1),
+        }
+    }
+
+    pub fn new_mut(&mut self) -> Self {
+        *self = self.new();
+        *self
     }
 }
 
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tmp(subs) => write!(f, "t{}", subs),
-            Self::Local(subs) => write!(f, "l{}", subs),
+            Self::Tmp(subs) => write!(f, "$t{}", subs),
+            Self::Local(subs) => write!(f, "$l{}", subs),
+            Self::Renamed(subs) => write!(f, "$r{}", subs),
+            Self::Ptr(subs) => write!(f, "$p{}", subs),
         }
     }
 }
 
 impl Key for Id {
     fn to_index(self) -> usize {
-        self.get_subs()
+        match self {
+            Self::Ptr(id) | Self::Local(id) => id,
+            _ => panic!("cannot index this id"),
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::Local(index)
     }
 }

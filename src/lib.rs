@@ -4,6 +4,7 @@ pub mod index_vec;
 pub mod ir;
 pub mod ir_builder;
 pub mod lexer;
+pub mod opt;
 pub mod parser;
 pub mod span;
 pub mod token;

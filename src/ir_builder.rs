@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     ast::*,
@@ -23,6 +23,10 @@ impl Key for BlockId {
     fn to_index(self) -> usize {
         self.0 as usize
     }
+
+    fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
 }
 
 impl std::fmt::Display for BlockId {
@@ -32,38 +36,59 @@ impl std::fmt::Display for BlockId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block {
-    id:    BlockId,
-    first: usize,
-    last:  usize,
-    len:   u32,
+pub struct Block<'a> {
+    id:         BlockId,
+    pub scope:  u32,
+    pub instrs: VecDeque<Instr<'a>>,
 }
 
-impl Block {
-    pub fn new(id: BlockId, first: usize) -> Self {
+impl<'a> Block<'a> {
+    pub fn new(id: BlockId, scope: u32) -> Self {
         Self {
             id,
-            first,
-            last: first,
-            len: 0,
+            scope,
+            instrs: VecDeque::new(),
         }
     }
 
     pub fn id(&self) -> BlockId {
         self.id
     }
+
+    fn push_front(&mut self, instr: Instr<'a>) {
+        self.instrs.push_front(instr)
+    }
+
+    fn push_back(&mut self, instr: Instr<'a>) {
+        self.instrs.push_back(instr)
+    }
+
+    pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
+        self.instrs.iter()
+    }
+
+    pub fn set_label(&mut self) {
+        if self.id.is_entry() {
+            return;
+        }
+        let kind = InstrKind::Label(self.id);
+        let instr = Instr::new(kind, Span::default(), TypeId::SelfType);
+        self.push_front(instr)
+    }
+
+    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr<'a>> {
+        self.instrs.iter_mut()
+    }
 }
 
 #[derive(Debug)]
 pub struct Method<'a> {
-    class:      TypeId,
-    id:         &'a str,
-    blocks:     IndexVec<BlockId, Block>,
-    cur_block:  BlockId,
-    cur_locals: Vec<HashMap<&'a str, Id>>,
-    locals:     IndexVec<Id, (&'a str, BlockId)>,
-    cur_tmp:    usize,
-    instrs:     Vec<Instr<'a>>,
+    class:       TypeId,
+    id:          &'a str,
+    pub blocks:  IndexVec<BlockId, Block<'a>>,
+    cur_locals:  Vec<HashMap<&'a str, Id>>,
+    locals:      IndexVec<Id, (&'a str, TypeId, BlockId)>,
+    pub cur_tmp: usize,
 }
 
 impl<'a> Method<'a> {
@@ -72,9 +97,7 @@ impl<'a> Method<'a> {
             class,
             id,
             cur_tmp: 0,
-            instrs: Vec::new(),
             blocks: index_vec![Block::new(BlockId::ENTRY, 0)],
-            cur_block: BlockId::ENTRY,
             cur_locals: Vec::new(),
             locals: IndexVec::new(),
         }
@@ -88,7 +111,11 @@ impl<'a> Method<'a> {
         self.id
     }
 
-    pub fn locals(&self) -> &IndexVec<Id, (&'a str, BlockId)> {
+    pub fn push_front(&mut self, block: BlockId, instr: Instr<'a>) {
+        self.blocks[block].push_front(instr)
+    }
+
+    pub fn locals(&self) -> &IndexVec<Id, (&'a str, TypeId, BlockId)> {
         &self.locals
     }
 
@@ -96,12 +123,20 @@ impl<'a> Method<'a> {
         (0..self.locals.len()).map(Id::Local)
     }
 
-    pub fn instrs(&self) -> &[Instr<'a>] {
-        &self.instrs
+    pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
+        self.blocks
+            .iter()
+            .flat_map(|(_, b)| b.instrs.iter().filter(|i| !i.kind.is_nop()))
     }
 
     pub fn blocks(&self) -> &[Block] {
         (&self.blocks).into()
+    }
+
+    pub fn set_labels(&mut self) {
+        for (_, b) in self.blocks.iter_mut() {
+            b.set_label();
+        }
     }
 
     fn get_local(&self, name: &'a str) -> Id {
@@ -111,10 +146,6 @@ impl<'a> Method<'a> {
             .find_map(|locals| locals.get(name))
             .copied()
             .unwrap()
-    }
-
-    fn cur_scope(&self) -> &HashMap<&'a str, Id> {
-        self.cur_locals.last().unwrap()
     }
 
     fn cur_scope_mut(&mut self) -> &mut HashMap<&'a str, Id> {
@@ -129,275 +160,115 @@ impl<'a> Method<'a> {
         self.cur_locals.pop().unwrap()
     }
 
-    fn new_block(&mut self) -> BlockId {
+    fn last_instr(&self) -> &Instr<'a> {
+        self.blocks.last().unwrap().instrs.back().unwrap()
+    }
+
+    fn begin_block(&mut self, span: Span) -> BlockId {
         assert!(self.blocks.len() < u32::MAX as usize);
+        assert!(self.cur_locals.len() < u32::MAX as usize);
         let id = BlockId(self.blocks.len() as u32);
-        let block = Block::new(id, 0);
+        let block = Block::new(id, self.cur_locals.len() as u32);
+        if !self.last_instr().kind.is_block_end() {
+            self.push_instr(Instr::new(InstrKind::Jmp(id), span, TypeId::SelfType));
+        }
         self.blocks.push(block);
         id
     }
 
-    fn last_instr(&self) -> &Instr<'a> {
-        self.instrs.last().unwrap()
-    }
-
-    fn begin_block(&mut self, block: BlockId, span: Span) -> BlockId {
-        if !self.last_instr().kind.block_end() {
-            self.push_instr(Instr::new(InstrKind::Jmp(block), span, TypeId::SelfType));
+    fn patch_jmp_cond(&mut self, block: BlockId, on_true: BlockId, on_false: BlockId) {
+        let instr = self.blocks[block].instrs.back_mut().unwrap();
+        match instr.kind {
+            InstrKind::JmpCond(cond, _, _) => {
+                instr.kind = InstrKind::JmpCond(cond, on_true, on_false);
+            }
+            _ => unreachable!(),
         }
-        let last = self.cur_block;
-        self.cur_block = block;
-        self.push_instr(Instr::new(InstrKind::Label(block), span, TypeId::SelfType));
-        last
     }
 
-    fn new_tmp(&mut self) -> Id {
+    fn patch_jmp(&mut self, block: BlockId, target: BlockId) {
+        let instr = self.blocks[block].instrs.back_mut().unwrap();
+        match instr.kind {
+            InstrKind::Jmp(_) => {
+                instr.kind = InstrKind::Jmp(target);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn new_tmp(&mut self) -> Id {
         let tmp = self.cur_tmp;
         self.cur_tmp += 1;
         Id::Tmp(tmp)
     }
 
+    fn cur_block(&self) -> BlockId {
+        BlockId(self.blocks.len() as u32 - 1)
+    }
+
     fn push_instr(&mut self, instr: Instr<'a>) {
-        let idx = self.cur_block;
-        if self.blocks[idx].len == 0 {
-            self.blocks[idx].first = self.instrs.len();
+        self.blocks.last_mut().unwrap().push_back(instr)
+    }
+
+    fn set_attrs(&mut self, attrs: impl Iterator<Item = (&'a str, TypeId)> + Clone, span: Span) {
+        for (name, ty) in attrs {
+            let id = self.new_ptr(name, ty);
+            let kind = InstrKind::Attr(ty, id);
+            let instr = Instr::new(kind, span, TypeId::SelfType);
+            self.push_instr(instr);
         }
-        self.blocks[idx].last = self.instrs.len();
-        self.blocks[idx].len += 1;
-        self.instrs.push(instr)
     }
 
-    fn extend_locals(&mut self, locals: impl Iterator<Item = &'a str> + Clone) {
-        let iter = locals.clone().zip((self.locals.len()..).map(Id::Local));
-        self.cur_scope_mut().extend(iter);
-        self.locals
-            .extend(locals.map(|name| (name, self.cur_block)));
+    fn set_params(&mut self, locals: impl Iterator<Item = (&'a str, TypeId)> + Clone, span: Span) {
+        let id = self.new_local("self", self.class);
+        let kind = InstrKind::Local(self.class, id);
+        let instr = Instr::new(kind, span, TypeId::SelfType);
+        self.push_instr(instr);
+
+        let tmp = self.new_tmp();
+        let kind = InstrKind::Store(id, self.class, tmp);
+        let instr = Instr::new(kind, span, TypeId::SelfType);
+        self.push_instr(instr);
+
+        for (name, ty) in locals {
+            let id = self.new_local(name, ty);
+            let kind = InstrKind::Local(ty, id);
+            let instr = Instr::new(kind, span, TypeId::SelfType);
+            self.push_instr(instr);
+
+            let tmp = self.new_tmp();
+            let kind = InstrKind::Store(id, ty, tmp);
+            let instr = Instr::new(kind, span, TypeId::SelfType);
+            self.push_instr(instr);
+        }
     }
 
-    fn new_local(&mut self, name: &'a str) -> Id {
+    fn new_local(&mut self, name: &'a str, ty: TypeId) -> Id {
         let local = self.locals.len();
         let id = Id::Local(local);
         self.cur_scope_mut().insert(name, id);
-        self.locals.push((name, self.cur_block));
+        self.locals.push((name, ty, self.cur_block()));
+        id
+    }
+
+    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> Id {
+        let local = self.locals.len();
+        let id = Id::Ptr(local);
+        self.cur_scope_mut().insert(name, id);
+        self.locals.push((name, ty, self.cur_block()));
         id
     }
 
     fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> Id {
-        let id = self.new_local(name);
-        let kind = InstrKind::Local(id, ty.size_of());
+        let id = self.new_local(name, ty);
+        let kind = InstrKind::Local(ty, id);
         let instr = Instr::new(kind, span, ty);
         self.push_instr(instr);
         id
     }
 
-    pub fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
-        let block = &self.blocks[block];
-
-        let last = block.last;
-
-        match self.instrs[last].kind {
-            InstrKind::Jmp(target) => {
-                f(target);
-            }
-            InstrKind::JmpIfZero(_, on_false, on_true) => {
-                f(on_true);
-                f(on_false);
-            }
-            InstrKind::EndMethod(_) => {}
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn block_instrs(&self, bb: BlockId) -> &[Instr<'a>] {
-        let block = &self.blocks[bb];
-        &self.instrs[block.first..=block.last]
-    }
-
-    pub fn block_instrs_visit<F: FnMut(&Instr)>(&self, bb: BlockId, mut f: F) {
-        for instr in self.block_instrs(bb) {
-            f(instr)
-        }
-    }
-
     pub fn block_ids(&self) -> impl Iterator<Item = BlockId> {
         (0..self.blocks.len() as u32).map(BlockId)
-    }
-
-    pub fn predecessors(&self) -> IndexVec<BlockId, Vec<BlockId>> {
-        let mut preds = index_vec![vec![]; self.blocks.len()];
-
-        for bb in self.block_ids() {
-            self.successors_visit(bb, |succ| preds[succ].push(bb));
-        }
-
-        preds
-    }
-
-    fn post_order(&self) -> Vec<BlockId> {
-        let mut post_order = vec![];
-        let mut visited = index_vec![false; self.blocks.len()];
-
-        fn visit(
-            fun: &Method<'_>,
-            bb: BlockId,
-            post_order: &mut Vec<BlockId>,
-            visited: &mut IndexVec<BlockId, bool>,
-        ) {
-            fun.successors_visit(bb, |succ| {
-                if !visited[succ] {
-                    visited[succ] = true;
-                    visit(fun, succ, post_order, visited);
-                }
-            });
-            post_order.push(bb);
-        }
-        visit(self, BlockId::ENTRY, &mut post_order, &mut visited);
-
-        post_order
-    }
-
-    fn post_order_indices(&self, post_order: &[BlockId]) -> IndexVec<BlockId, Option<u32>> {
-        let mut post_idx = index_vec![None; self.blocks.len()];
-        for (idx, &bb) in post_order.iter().enumerate() {
-            post_idx[bb] = Some(idx as u32);
-        }
-        post_idx
-    }
-
-    pub fn idoms(&self, preds: &IndexVec<BlockId, Vec<BlockId>>) -> IndexVec<BlockId, BlockId> {
-        let post_ord = self.post_order();
-        let post_idx = self.post_order_indices(&post_ord);
-
-        let mut doms = index_vec![None; self.blocks.len()];
-        let b0 = post_idx[BlockId::ENTRY].unwrap();
-        doms[b0] = Some(b0);
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for block in post_ord.iter().filter(|b| !b.is_entry()).rev().copied() {
-                let preds = &preds[block];
-                let idx = post_idx[block].unwrap();
-
-                let mut new_idom = post_idx[preds[0]].unwrap();
-
-                for pred in preds
-                    .iter()
-                    .copied()
-                    .filter_map(|pred| post_idx.get(pred).and_then(|idx| *idx))
-                {
-                    if doms[pred].is_some() {
-                        let mut x = new_idom;
-                        let mut y = pred;
-
-                        while x != y {
-                            while x < y {
-                                x = doms[x].unwrap();
-                            }
-                            while y < x {
-                                y = doms[y].unwrap();
-                            }
-                        }
-
-                        new_idom = x;
-                    }
-                }
-
-                if doms[idx] != Some(new_idom) {
-                    doms[idx] = Some(new_idom);
-                    changed = true;
-                }
-            }
-        }
-
-        self.block_ids()
-            .map(|bb| match post_idx.get(bb) {
-                Some(post_index) => {
-                    let post_index = post_index.unwrap();
-                    let idom_post_index = doms[post_index].unwrap();
-                    let idom = post_ord[idom_post_index.to_index()];
-                    idom
-                }
-                None => bb,
-            })
-            .collect()
-    }
-
-    pub fn dom_frontiers(
-        &self,
-        preds: &IndexVec<BlockId, Vec<BlockId>>,
-        idoms: &IndexVec<BlockId, BlockId>,
-    ) -> IndexVec<BlockId, Vec<BlockId>> {
-        let mut frontiers = index_vec![vec![]; self.blocks.len()];
-
-        for bb in self.block_ids().filter(|b| preds[*b].len() >= 2) {
-            let Some(idom) = idoms.get(bb).copied() else {
-                continue;
-            };
-
-            for pred in preds[bb]
-                .iter()
-                .copied()
-                .filter(|&pred| pred.is_entry() || pred != idoms[pred])
-            {
-                let mut at = pred;
-                while at != idom {
-                    let df = &mut frontiers[at];
-                    if !df.contains(&bb) {
-                        df.push(bb);
-                    }
-                    at = idoms[at];
-                }
-            }
-        }
-
-        frontiers
-    }
-
-    fn contains_store(&self, block: BlockId, local: Id) -> bool {
-        let block = &self.blocks[block];
-
-        self.instrs[block.first..=block.last]
-            .iter()
-            .find(|instr| matches!(instr.kind, InstrKind::Store(id, _) if id == local))
-            .is_some()
-    }
-
-    fn all_stores(&self) -> impl Iterator<Item = (Id, Vec<BlockId>)> + '_ {
-        self.local_ids().map(|local| {
-            (
-                local,
-                self.block_ids()
-                    .filter(|b| self.contains_store(*b, local))
-                    .collect(),
-            )
-        })
-    }
-
-    pub fn phi_positions(
-        &self,
-        dom_frontiers: &IndexVec<BlockId, Vec<BlockId>>,
-    ) -> IndexVec<BlockId, Vec<Id>> {
-        let mut phi_positions: IndexVec<BlockId, Vec<Id>> = index_vec![vec![]; self.blocks.len()];
-        let stores = self.all_stores();
-
-        for (local, mut stores) in stores {
-            let mut visited = index_vec![false; self.blocks.len()];
-            while let Some(block) = stores.pop() {
-                for frontier in dom_frontiers[block].iter().copied() {
-                    let phis = &mut phi_positions[frontier];
-                    if !phis.contains(&local) {
-                        phis.push(local);
-                    }
-                    if !visited[frontier] {
-                        visited[frontier] = true;
-                        stores.push(frontier);
-                    }
-                }
-            }
-        }
-
-        phi_positions
     }
 }
 
@@ -419,6 +290,10 @@ impl<'a> IrBuilder<'a> {
 
     pub fn methods(&self) -> &[Method<'a>] {
         &self.methods
+    }
+
+    pub fn methods_mut(&mut self) -> &mut [Method<'a>] {
+        &mut self.methods
     }
 
     pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
@@ -453,19 +328,6 @@ impl<'a> IrBuilder<'a> {
         self.cur_method_mut().end_scope()
     }
 
-    fn begin_method(&mut self, id: &'a str, params: &[TypedFormal<'a>]) {
-        let mut method = Method::new(self.cur_class, id);
-        let class_attrs = self.env.get_class(self.cur_class).unwrap().attrs();
-        method.begin_scope();
-        method.new_local("self");
-        let iter = class_attrs
-            .keys()
-            .copied()
-            .chain(params.iter().map(|f| f.id));
-        method.extend_locals(iter);
-        self.methods.push(method)
-    }
-
     fn end_method(&mut self) -> HashMap<&'a str, Id> {
         self.end_scope()
     }
@@ -474,12 +336,21 @@ impl<'a> IrBuilder<'a> {
         self.cur_method_mut().new_tmp()
     }
 
-    fn new_block(&mut self) -> BlockId {
-        self.cur_method_mut().new_block()
+    fn begin_block(&mut self, span: Span) -> BlockId {
+        self.cur_method_mut().begin_block(span)
     }
 
-    fn begin_block(&mut self, block: BlockId, span: Span) -> BlockId {
-        self.cur_method_mut().begin_block(block, span)
+    fn patch_jmp_cond(&mut self, block: BlockId, on_true: BlockId, on_false: BlockId) {
+        self.cur_method_mut()
+            .patch_jmp_cond(block, on_true, on_false)
+    }
+
+    fn patch_jmp(&mut self, block: BlockId, target: BlockId) {
+        self.cur_method_mut().patch_jmp(block, target)
+    }
+
+    fn cur_block(&self) -> BlockId {
+        self.cur_method().cur_block()
     }
 
     fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> Id {
@@ -488,10 +359,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn build_class(&mut self, class: TypedClass<'a>) {
         let TypedClass {
-            id,
-            type_id,
-            methods,
-            ..
+            type_id, methods, ..
         } = class;
 
         self.cur_class = type_id;
@@ -499,27 +367,38 @@ impl<'a> IrBuilder<'a> {
         // self.build_new(type_id);
 
         for method in methods.into_vec() {
-            self.build_method(id, method);
+            self.build_method(method);
         }
     }
 
-    fn build_method(
-        &mut self,
-        type_name: &'a str,
-        method: TypedMethod<'a>,
-    ) -> HashMap<&'a str, Id> {
-        self.begin_method(method.id(), method.params());
-        let span = method.span;
-        let kind = InstrKind::Method(type_name, method.id());
+    fn build_method(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, Id> {
+        let id = typed_method.id();
+        let params = typed_method.params();
+        let span = typed_method.span;
+
+        let mut method = Method::new(self.cur_class, id);
+        let class_attrs = self.env.get_class(self.cur_class).unwrap().attrs();
+
+        method.begin_scope();
+        let mut instr_params = vec![self.cur_class];
+        instr_params.extend(params.iter().map(|f| f.ty));
+        let kind = InstrKind::Method(
+            self.cur_class,
+            id,
+            instr_params.into_boxed_slice(),
+            typed_method.return_ty(),
+        );
         let instr = Instr::new(kind, span, TypeId::SelfType);
-        self.push_instr(instr);
-        let kind = InstrKind::BeginMethod(method.size());
-        let instr = Instr::new(kind, span, TypeId::SelfType);
-        self.push_instr(instr);
-        let (body, ty) = self.build_expr(method.take_body());
-        let kind = InstrKind::EndMethod(body);
+        method.push_instr(instr);
+        method.set_params(params.iter().map(|f| (f.id, f.ty)), span);
+        method.set_attrs(class_attrs.iter().map(|(k, ty)| (*k, *ty)), span);
+        self.methods.push(method);
+
+        let (body, ty) = self.build_expr(typed_method.take_body());
+        let kind = InstrKind::Return(body);
         let instr = Instr::new(kind, span, ty);
         self.push_instr(instr);
+
         self.end_method()
     }
 
@@ -570,7 +449,7 @@ impl<'a> IrBuilder<'a> {
             TEK::Id(id) => {
                 let tmp = self.new_tmp();
                 let id = self.get_local(id);
-                let kind = InstrKind::AssignLoad(tmp, id);
+                let kind = InstrKind::AssignLoad(tmp, ty, id);
                 let instr = Instr::new(kind, span, ty);
                 self.push_instr(instr);
                 (tmp, ty)
@@ -593,11 +472,16 @@ impl<'a> IrBuilder<'a> {
                 (tmp, ty)
             }
             TEK::New(ty) => {
-                let tmp = self.new_tmp();
-                let kind = InstrKind::AssignNew(tmp, ty);
+                let tmp1 = self.new_tmp();
+                let kind = InstrKind::AssignInt(tmp1, 0);
+                let instr = Instr::new(kind, span, TypeId::INT);
+                self.push_instr(instr);
+
+                let tmp2 = self.new_tmp();
+                let kind = InstrKind::AssignStaticDispatch(tmp2, tmp1, ty, "New", Box::new([]));
                 let instr = Instr::new(kind, span, ty);
                 self.push_instr(instr);
-                (tmp, ty)
+                (tmp2, ty)
             }
             TEK::Assign(id, expr) => {
                 let (expr, expr_ty) = self.build_expr(*expr);
@@ -605,14 +489,14 @@ impl<'a> IrBuilder<'a> {
                     .build_maybe_cast(ty, expr, expr_ty, span)
                     .unwrap_or(expr);
                 let id = self.get_local(id);
-                let kind = InstrKind::Store(id, new_expr);
+                let kind = InstrKind::Store(id, ty, new_expr);
                 let instr = Instr::new(kind, span, ty);
                 self.push_instr(instr);
                 (new_expr, ty)
             }
             TEK::SelfId => {
                 let tmp = self.new_tmp();
-                let kind = InstrKind::AssignLoad(tmp, Id::LOCAL_SELF);
+                let kind = InstrKind::AssignLoad(tmp, self.cur_class, Id::LOCAL_SELF);
                 let instr = Instr::new(kind, span, ty);
                 self.push_instr(instr);
                 (tmp, ty)
@@ -633,7 +517,7 @@ impl<'a> IrBuilder<'a> {
                             let expr = self
                                 .build_maybe_cast(ty, expr, expr_ty, span)
                                 .unwrap_or(expr);
-                            let kind = InstrKind::Store(id, expr);
+                            let kind = InstrKind::Store(id, ty, expr);
                             let instr = Instr::new(kind, span, ty);
                             self.push_instr(instr);
                         }
@@ -643,7 +527,7 @@ impl<'a> IrBuilder<'a> {
                             let kind = InstrKind::AssignDefault(tmp);
                             let instr = Instr::new(kind, span, ty);
                             self.push_instr(instr);
-                            let kind = InstrKind::Store(id, tmp);
+                            let kind = InstrKind::Store(id, ty, tmp);
                             let instr = Instr::new(kind, span, ty);
                             self.push_instr(instr);
                         }
@@ -655,10 +539,9 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::Block(exprs) => {
                 let exprs = exprs.into_vec().into_iter();
-                let res = exprs.fold((Id::Tmp(0), TypeId::SelfType), |_, expr| {
+                exprs.fold((Id::Tmp(0), TypeId::SelfType), |_, expr| {
                     self.build_expr(expr)
-                });
-                res
+                })
             }
             TEK::If(cond, then, els) => self.build_if(*cond, *then, *els, ty, span),
             TEK::While(cond, body) => self.build_while(*cond, *body, span),
@@ -684,25 +567,22 @@ impl<'a> IrBuilder<'a> {
         body: TypedExpr<'a>,
         span: Span,
     ) -> (Id, TypeId) {
-        let cond_block = self.new_block();
-        let body_block = self.new_block();
-        let end_block = self.new_block();
-
-        let _ = self.begin_block(cond_block, cond.span);
+        let cond_block = self.begin_block(cond.span);
         let (cond, _) = self.build_expr(cond);
-        let jmp_0_kind = InstrKind::JmpIfZero(cond, end_block, body_block);
+        let jmp_0_kind = InstrKind::JmpCond(cond, cond_block, cond_block);
         self.push_instr(Instr::new(jmp_0_kind, span, TypeId::SelfType));
 
-        let _ = self.begin_block(body_block, body.span);
+        let body_block = self.begin_block(body.span);
         let _ = self.build_expr(body);
         let jmp_kind = InstrKind::Jmp(cond_block);
         self.push_instr(Instr::new(jmp_kind, span, TypeId::SelfType));
 
-        let _ = self.begin_block(end_block, span);
+        let end_block = self.begin_block(span);
         let tmp = self.new_tmp();
         let kind = InstrKind::AssignDefault(tmp);
         let instr = Instr::new(kind, span, TypeId::OBJECT);
         self.push_instr(instr);
+        self.patch_jmp_cond(cond_block, body_block, end_block);
         (tmp, TypeId::OBJECT)
     }
 
@@ -716,29 +596,29 @@ impl<'a> IrBuilder<'a> {
     ) -> (Id, TypeId) {
         let (cond, _) = self.build_expr(cond);
 
-        let then_block = self.new_block();
-        let else_block = self.new_block();
-        let end_block = self.new_block();
-        let jmp_0_kind = InstrKind::JmpIfZero(cond, else_block, then_block);
+        let cond_block = self.cur_block();
+        let jmp_0_kind = InstrKind::JmpCond(cond, cond_block, cond_block);
         self.push_instr(Instr::new(jmp_0_kind, span, TypeId::SelfType));
 
-        let _ = self.begin_block(then_block, then.span);
+        let then_block = self.begin_block(then.span);
         let (then, then_ty) = self.build_expr(then);
         let then = self
             .build_maybe_cast(ty, then, then_ty, span)
             .unwrap_or(then);
-        let jmp_kind = InstrKind::Jmp(end_block);
+        let jmp_kind = InstrKind::Jmp(then_block);
         self.push_instr(Instr::new(jmp_kind, span, TypeId::SelfType));
 
-        let _ = self.begin_block(else_block, els.span);
+        let else_block = self.begin_block(els.span);
         let (els, els_ty) = self.build_expr(els);
         let els = self.build_maybe_cast(ty, els, els_ty, span).unwrap_or(els);
 
-        let _ = self.begin_block(end_block, span);
+        let end_block = self.begin_block(span);
         let tmp = self.new_tmp();
         let kind = InstrKind::Phi(tmp, vec![then, els]);
         let instr = Instr::new(kind, span, ty);
         self.push_instr(instr);
+        self.patch_jmp_cond(cond_block, then_block, else_block);
+        self.patch_jmp(then_block, end_block);
         (tmp, ty)
     }
 
@@ -755,43 +635,32 @@ impl<'a> IrBuilder<'a> {
             .unwrap()
             .params()
             .to_vec();
-        let len = args.len();
-        let args_size = self.build_args(args, method_params, span);
+        let args = self.build_args(args, method_params);
 
         let tmp1 = self.new_tmp();
-        let kind = InstrKind::AssignLoad(tmp1, Id::LOCAL_SELF);
+        let kind = InstrKind::AssignLoad(tmp1, self.cur_class, Id::LOCAL_SELF);
         let instr = Instr::new(kind, span, self.cur_class);
         self.push_instr(instr);
 
         let tmp2 = self.new_tmp();
-        let kind = InstrKind::AssignDispatch(tmp2, tmp1, method_name, len);
+        let kind = InstrKind::AssignDispatch(tmp2, tmp1, method_name, args.into_boxed_slice());
         let instr = Instr::new(kind, span, ty);
         self.push_instr(instr);
 
-        let kind = InstrKind::PopArgs(args_size);
-        let instr = Instr::new(kind, span, TypeId::SelfType);
-        self.push_instr(instr);
         (tmp2, ty)
     }
 
-    fn build_args(&mut self, args: Box<[TypedExpr<'a>]>, params: Vec<TypeId>, span: Span) -> usize {
-        let mut len = 0;
+    fn build_args(&mut self, args: Box<[TypedExpr<'a>]>, params: Vec<TypeId>) -> Vec<(TypeId, Id)> {
+        let mut arg_ids = vec![];
         for (arg, param) in args.into_vec().into_iter().zip(params) {
             let arg_span = arg.span;
             let (arg, arg_ty) = self.build_expr(arg);
             let arg = self
                 .build_maybe_cast(param, arg, arg_ty, arg_span)
                 .unwrap_or(arg);
-            len += if matches!(param, TypeId::INT | TypeId::BOOL) {
-                8
-            } else {
-                16
-            };
-            let kind = InstrKind::PushArg(arg);
-            let instr = Instr::new(kind, span, TypeId::SelfType);
-            self.push_instr(instr);
+            arg_ids.push((param, arg));
         }
-        len
+        arg_ids
     }
 
     fn build_dispatch(
@@ -811,16 +680,11 @@ impl<'a> IrBuilder<'a> {
             .params()
             .to_vec();
 
-        let len = args.len();
-        let args_size = self.build_args(args, method_params, span);
+        let args = self.build_args(args, method_params);
 
         let tmp = self.new_tmp();
-        let kind = InstrKind::AssignDispatch(tmp, expr, method_name, len);
+        let kind = InstrKind::AssignDispatch(tmp, expr, method_name, args.into_boxed_slice());
         let instr = Instr::new(kind, span, ty);
-        self.push_instr(instr);
-
-        let kind = InstrKind::PopArgs(args_size);
-        let instr = Instr::new(kind, span, TypeId::SelfType);
         self.push_instr(instr);
 
         (tmp, ty)
@@ -841,17 +705,14 @@ impl<'a> IrBuilder<'a> {
             .unwrap()
             .params()
             .to_vec();
-        let len = args.len();
-        let args_size = self.build_args(args, method_params, span);
+
+        let args = self.build_args(args, method_params);
 
         let (expr, _) = self.build_expr(expr);
         let tmp = self.new_tmp();
-        let kind = InstrKind::AssignStaticDispatch(tmp, expr, ty, method_name, len);
+        let kind =
+            InstrKind::AssignStaticDispatch(tmp, expr, ty, method_name, args.into_boxed_slice());
         let instr = Instr::new(kind, span, result_ty);
-        self.push_instr(instr);
-
-        let kind = InstrKind::PopArgs(args_size);
-        let instr = Instr::new(kind, span, TypeId::SelfType);
         self.push_instr(instr);
 
         (tmp, result_ty)

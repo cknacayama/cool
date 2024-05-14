@@ -52,20 +52,11 @@ fn main() {
         println!("{}", instr.kind);
     }
 
-    for block in builder.blocks() {
-        println!("{:?}", block);
+    for method in builder.methods_mut() {
+        method.mem2reg();
     }
 
-    for method in builder.methods() {
-        let preds = method.predecessors();
-        let idoms = method.idoms(&preds);
-        let dom_front = method.dom_frontiers(&preds, &idoms);
-        let phis = method.phi_positions(&dom_front);
-        for block in method.block_ids() {
-            println!("{}: idoms: {:?}", block, idoms[block]);
-            println!("    dom_front: {:?}", dom_front[block]);
-            println!("    phis: {:?}", phis[block]);
-            println!("    preds: {:?}", preds[block]);
-        }
+    for instr in builder.instrs() {
+        println!("{}", instr.kind);
     }
 }
