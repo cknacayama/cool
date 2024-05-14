@@ -30,7 +30,7 @@ impl std::fmt::Display for ParseErrorKind {
         match self {
             Self::LexError(kind) => write!(f, "{}", kind),
             Self::UnexpectedEof => write!(f, "unexpected end of file"),
-            Self::ExpectedToken(token) => write!(f, "expected token: {:?}", token),
+            Self::ExpectedToken(token) => write!(f, "expected token: '{}'", token),
             Self::ExpectedType => write!(f, "expected type"),
             Self::ExpectedExpr => write!(f, "expected expression"),
             Self::ExpectedId => write!(f, "expected identifier"),
@@ -196,9 +196,7 @@ impl<'a> Parser<'a> {
 
         while !self.peek_if(TokenKind::RBrace) {
             exprs.push(self.parse_expr()?);
-            if self.next_if(TokenKind::Semicolon).is_none() {
-                break;
-            }
+            self.expect(TokenKind::Semicolon)?;
         }
 
         let span = span.merge(&self.expect(TokenKind::RBrace)?);

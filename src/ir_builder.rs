@@ -84,7 +84,7 @@ impl<'a> Block<'a> {
         self.instrs.iter_mut()
     }
 
-    pub fn phis_args(&mut self) -> Vec<&mut Vec<Id>> {
+    pub fn phis_args(&mut self) -> Vec<&mut Box<[Id]>> {
         let mut phis = vec![];
         for instr in self.instrs.iter_mut() {
             if let InstrKind::Phi(_, args) = &mut instr.kind {
@@ -658,7 +658,7 @@ impl<'a> IrBuilder<'a> {
 
         let end_block = self.begin_block(span);
         let tmp = self.new_tmp();
-        let kind = InstrKind::Phi(tmp, vec![then, els]);
+        let kind = InstrKind::Phi(tmp, [then, els].into());
         let instr = Instr::new(kind, span, ty);
         self.push_instr(instr);
         self.patch_jmp_cond(cond_block, then_block, else_block);

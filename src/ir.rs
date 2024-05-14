@@ -39,7 +39,7 @@ pub enum InstrKind<'a> {
     AssignToObj(Id, TypeId, Id),
     AssignDispatch(Id, Id, &'a str, Box<[(TypeId, Id)]>),
     AssignStaticDispatch(Id, Id, TypeId, &'a str, Box<[(TypeId, Id)]>),
-    Phi(Id, Vec<Id>),
+    Phi(Id, Box<[Id]>),
 
     // before mem2reg
     Local(TypeId, Id),
@@ -56,113 +56,11 @@ impl<'a> InstrKind<'a> {
         )
     }
 
-    pub fn rename(&mut self, renames: &mut HashMap<Id, Vec<Id>>, tmp: &mut Id) {
-        match self {
-            Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => {}
-
-            Self::Local(_, ref id) => {
-                *self = Self::Nop;
-            }
-
-            Self::Param(_, id)
-            | Self::AssignDefault(id, _)
-            | Self::AssignInt(id, _)
-            | Self::AssignBool(id, _)
-            | Self::AssignStr(id, _)
-            | Self::Attr(_, id) => {
-                let new_id = tmp.new_mut();
-                renames.entry(*id).or_default().push(new_id);
-                *id = new_id;
-            }
-
-            Self::JmpCond(id, _, _) | Self::Return(id) => {
-                let cur_id = renames.get(id).unwrap().last().unwrap();
-                *id = *cur_id;
-            }
-
-            Self::Store(id1, _, id2) if id1.is_ptr() => {
-                let cur_id1 = renames.get(id1).unwrap().last().unwrap();
-                *id1 = *cur_id1;
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *id2 = *cur_id2;
-            }
-
-            Self::Store(id1, _, id2) => {
-                let new_id = tmp.new_mut();
-                renames.entry(*id1).or_default().push(new_id);
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *self = Self::Assign(new_id, *cur_id2);
-            }
-
-            Self::AssignLoad(id1, _, id2) if id2.is_ptr() => {
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *id2 = *cur_id2;
-                let new_id = tmp.new_mut();
-                renames.entry(*id1).or_default().push(new_id);
-                *id1 = new_id;
-            }
-
-            Self::AssignLoad(id1, _, id2) => {
-                let new_id = tmp.new_mut();
-                renames.entry(*id1).or_default().push(new_id);
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *self = Self::Assign(new_id, *cur_id2);
-            }
-
-            Self::Assign(id1, id2)
-            | Self::AssignUn(_, id1, id2)
-            | Self::AssignToObj(id1, _, id2) => {
-                let cur_id = renames.get(id2).unwrap().last().unwrap();
-                *id2 = *cur_id;
-                let new_id = tmp.new_mut();
-                renames.entry(*id1).or_default().push(new_id);
-                *id1 = new_id;
-            }
-
-            Self::AssignBin(_, id, lhs, rhs) => {
-                let cur_lhs = renames.get(lhs).unwrap().last().unwrap();
-                *lhs = *cur_lhs;
-                let cur_rhs = renames.get(rhs).unwrap().last().unwrap();
-                *rhs = *cur_rhs;
-                let new_id = tmp.new_mut();
-                renames.entry(*id).or_default().push(new_id);
-                *id = new_id;
-            }
-
-            Self::AssignDispatch(id1, id2, _, args)
-            | Self::AssignStaticDispatch(id1, id2, _, _, args) => {
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *id2 = *cur_id2;
-                for (_, id) in args.iter_mut() {
-                    let cur_id = renames.get(id).unwrap().last().unwrap();
-                    *id = *cur_id;
-                }
-                let new_id = tmp.new_mut();
-                renames.entry(*id1).or_default().push(new_id);
-                *id1 = new_id;
-            }
-
-            Self::Phi(id, vals) => {
-                let new_id = tmp.new_mut();
-                renames.entry(*id).or_default().push(new_id);
-                let old_id = *id;
-                *id = new_id;
-                if old_id.is_local() {
-                    return;
-                }
-                for val in vals.iter_mut().filter(|val| !val.is_renamed()) {
-                    let cur_val = renames.get(val).unwrap().last().unwrap();
-                    *val = *cur_val;
-                }
-            }
-        }
-    }
-
     pub fn is_nop(&self) -> bool {
         matches!(self, Self::Nop)
     }
 
-    pub fn uses(&self) -> (Option<Id>, Option<Vec<Id>>) {
+    pub fn uses(&self) -> (Option<Id>, Option<Box<[Id]>>) {
         match self {
             Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => (None, None),
 
@@ -174,15 +72,15 @@ impl<'a> InstrKind<'a> {
             | Self::Local(_, id)
             | Self::Attr(_, id) => (Some(*id), None),
 
-            Self::JmpCond(id, _, _) | Self::Return(id) => (None, Some(vec![*id])),
+            Self::JmpCond(id, _, _) | Self::Return(id) => (None, Some([*id].into())),
 
             Self::Assign(id1, id2)
             | Self::AssignUn(_, id1, id2)
             | Self::AssignToObj(id1, _, id2)
             | Self::Store(id1, _, id2)
-            | Self::AssignLoad(id1, _, id2) => (Some(*id1), Some(vec![*id2])),
+            | Self::AssignLoad(id1, _, id2) => (Some(*id1), Some([*id2].into())),
 
-            Self::AssignBin(_, id, lhs, rhs) => (Some(*id), Some(vec![*lhs, *rhs])),
+            Self::AssignBin(_, id, lhs, rhs) => (Some(*id), Some([*lhs, *rhs].into())),
 
             Self::AssignDispatch(id1, id2, _, args)
             | Self::AssignStaticDispatch(id1, id2, _, _, args) => (
@@ -193,7 +91,8 @@ impl<'a> InstrKind<'a> {
                         .fold(vec![*id2], |mut vars, id| {
                             vars.push(id);
                             vars
-                        }),
+                        })
+                        .into(),
                 ),
             ),
 
@@ -210,7 +109,7 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
                 write!(f, "method {} {}.{} {} {{", ret_ty, ty, name, arity)
             }
             InstrKind::Param(ty, id) => write!(f, "    param {} {}", ty, id),
-            InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),
+            InstrKind::Return(id) => write!(f, "    ret {}\n}}\n", id),
             InstrKind::Label(subs) => write!(f, "block{}:", subs),
             InstrKind::Jmp(subs) => write!(f, "    jmp block{}", subs),
             InstrKind::JmpCond(id, on_true, on_false) => {

@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod checker;
+pub mod cli;
 pub mod index_vec;
 pub mod ir;
 pub mod ir_builder;

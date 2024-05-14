@@ -1,9 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    rc::Rc,
-};
+use std::{collections::HashMap, rc::Rc};
 
 use crate::{
     ast::{BinOp, UnOp},
@@ -13,11 +8,23 @@ use crate::{
     types::TypeId,
 };
 
+pub fn optimize(method: &mut Method<'_>, default_string: Rc<str>) {
+    let preds = method.predecessors();
+    let idoms = method.idoms(&preds);
+    let dom_tree = method.dom_tree(&idoms);
+    let dom_frontiers = method.dom_frontiers(&preds, &idoms);
+    let phis = method.phi_positions(&preds, &dom_frontiers);
+
+    method.mem2reg(&preds, &dom_tree, phis);
+    method.dead_code_elimination();
+    method.const_propagation(default_string, &dom_tree);
+}
+
 type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
 type ImmediateDominators = IndexVec<BlockId, BlockId>;
 type DominatorTree = IndexVec<BlockId, Vec<BlockId>>;
 type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
-type PhiPositions = IndexVec<BlockId, Vec<(Id, Vec<Id>, TypeId)>>;
+type PhiPositions = IndexVec<BlockId, Vec<(Id, Box<[Id]>, TypeId)>>;
 
 impl<'a> Method<'a> {
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
@@ -221,7 +228,7 @@ impl<'a> Method<'a> {
                     _ => {}
                 }
                 if let Some(used) = used {
-                    for u in used.into_iter().filter(|u| u.is_local()) {
+                    for u in used.into_vec().into_iter().filter(|u| u.is_local()) {
                         uses[u].1.push(block_id);
                     }
                 }
@@ -300,7 +307,7 @@ impl<'a> Method<'a> {
                     let phis = &mut phi_positions[frontier];
                     if !phis.iter().any(|(l, _, _)| *l == local) {
                         let ty = self.locals()[local].1;
-                        phis.push((local, vec![local; preds[frontier].len()], ty));
+                        phis.push((local, vec![local; preds[frontier].len()].into(), ty));
                         if !visited[frontier] {
                             visited[frontier] = true;
                             stores.push(frontier);
@@ -318,7 +325,7 @@ impl<'a> Method<'a> {
             method: &mut Method<'_>,
             cur_name: &mut Id,
             block: BlockId,
-            renames: &mut HashMap<Id, Vec<Id>>,
+            renames: &mut HashMap<Id, Id>,
             dom_tree: &DominatorTree,
             preds: &Predecessors,
         ) {
@@ -329,8 +336,7 @@ impl<'a> Method<'a> {
             method.successors_inner_visit(block, |s| {
                 let j = preds[s.id()].iter().position(|&p| p == block).unwrap();
                 for args in s.phis_args() {
-                    let old_id = args[j];
-                    args[j] = *renames[&old_id].last().unwrap();
+                    args[j] = renames[&args[j]];
                 }
             });
 
@@ -348,7 +354,7 @@ impl<'a> Method<'a> {
             &mut renames,
             dom_tree,
             preds,
-        )
+        );
     }
 
     fn insert_phis(&mut self, phis: PhiPositions) {
@@ -362,26 +368,21 @@ impl<'a> Method<'a> {
         }
     }
 
-    pub fn mem2reg(&mut self) {
-        let preds = self.predecessors();
-        let idoms = self.idoms(&preds);
-        let dom_tree = self.dom_tree(&idoms);
-        let dom_front = self.dom_frontiers(&preds, &idoms);
-        let mut phis = self.phi_positions(&preds, &dom_front);
+    fn mem2reg(&mut self, preds: &Predecessors, dom_tree: &DominatorTree, phis: PhiPositions) {
         self.insert_phis(phis);
         self.rename_locals(&preds, &dom_tree);
         self.set_labels();
     }
 
-    pub fn dead_code_elimination(&mut self) {
+    fn dead_code_elimination(&mut self) {
         // contains the (use_count, decl_index, variables_used_in_decl)
-        let mut counter: HashMap<Id, (usize, Option<&mut InstrKind>, Option<Vec<Id>>)> =
+        let mut counter: HashMap<Id, (usize, Option<&mut InstrKind>, Option<Box<[Id]>>)> =
             HashMap::new();
 
         for instr in self.instrs_mut().map(|instr| &mut instr.kind) {
             let (decl, used) = instr.uses();
             if let Some(used) = used.as_ref() {
-                for u in used {
+                for u in used.iter() {
                     let (used, _, _) = counter.entry(*u).or_insert((0, None, None));
                     *used += 1;
                 }
@@ -408,7 +409,7 @@ impl<'a> Method<'a> {
             let instr = instr.unwrap();
             *instr = InstrKind::Nop;
             if let Some(used) = used {
-                for u in used {
+                for u in used.iter() {
                     let (used, _, _) = counter.get_mut(&u).unwrap();
                     *used -= 1;
                 }
@@ -416,11 +417,7 @@ impl<'a> Method<'a> {
         }
     }
 
-    pub fn const_propagation(&mut self, default_string: Rc<str>) {
-        let preds = self.predecessors();
-        let idoms = self.idoms(&preds);
-        let dom_tree = self.dom_tree(&idoms);
-
+    fn const_propagation(&mut self, default_string: Rc<str>, dom_tree: &DominatorTree) {
         let mut values = HashMap::new();
         let mut stack: Vec<BlockId> = vec![BlockId::ENTRY];
 
@@ -660,6 +657,108 @@ impl<'a> Method<'a> {
                     values.insert(id, Value::Bool(val));
                     *instr = InstrKind::AssignBool(id, val);
                 }
+            }
+        }
+    }
+}
+
+impl<'a> InstrKind<'a> {
+    pub fn rename(&mut self, renames: &mut HashMap<Id, Id>, tmp: &mut Id) {
+        match self {
+            Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => {}
+
+            Self::Local(_, _) => {
+                *self = Self::Nop;
+            }
+
+            Self::Param(_, id)
+            | Self::AssignDefault(id, _)
+            | Self::AssignInt(id, _)
+            | Self::AssignBool(id, _)
+            | Self::AssignStr(id, _)
+            | Self::Attr(_, id) => {
+                let new_id = tmp.new_mut();
+                renames.insert(*id, new_id);
+                *id = new_id;
+            }
+
+            Self::JmpCond(id, _, _) | Self::Return(id) => {
+                let cur_id = renames.get(id).unwrap();
+                *id = *cur_id;
+            }
+
+            Self::Store(id1, _, id2) if id1.is_ptr() => {
+                let cur_id1 = renames.get(id1).unwrap();
+                *id1 = *cur_id1;
+                let cur_id2 = renames.get(id2).unwrap();
+                *id2 = *cur_id2;
+            }
+
+            Self::Store(id1, _, id2) => {
+                let cur_id2 = *renames.get(id2).unwrap();
+                let new_id = tmp.new_mut();
+                renames.insert(*id1, new_id);
+                *self = Self::Assign(new_id, cur_id2);
+            }
+
+            Self::AssignLoad(id1, _, id2) if id2.is_ptr() => {
+                let cur_id2 = renames.get(id2).unwrap();
+                *id2 = *cur_id2;
+                let new_id = tmp.new_mut();
+                renames.insert(*id1, new_id);
+                *id1 = new_id;
+            }
+
+            Self::AssignLoad(id1, _, id2) => {
+                let cur_id2 = *renames.get(id2).unwrap();
+                let new_id = tmp.new_mut();
+                renames.insert(*id1, new_id);
+                *self = Self::Assign(new_id, cur_id2);
+            }
+
+            Self::Assign(id1, id2)
+            | Self::AssignUn(_, id1, id2)
+            | Self::AssignToObj(id1, _, id2) => {
+                let cur_id = renames.get(id2).unwrap();
+                *id2 = *cur_id;
+                let new_id = tmp.new_mut();
+                renames.insert(*id1, new_id);
+                *id1 = new_id;
+            }
+
+            Self::AssignBin(_, id, lhs, rhs) => {
+                let cur_lhs = renames.get(lhs).unwrap();
+                *lhs = *cur_lhs;
+                let cur_rhs = renames.get(rhs).unwrap();
+                *rhs = *cur_rhs;
+                let new_id = tmp.new_mut();
+                renames.insert(*id, new_id);
+                *id = new_id;
+            }
+
+            Self::AssignDispatch(id1, id2, _, args)
+            | Self::AssignStaticDispatch(id1, id2, _, _, args) => {
+                let cur_id2 = renames.get(id2).unwrap();
+                *id2 = *cur_id2;
+                for (_, id) in args.iter_mut() {
+                    let cur_id = renames.get(id).unwrap();
+                    *id = *cur_id;
+                }
+                let new_id = tmp.new_mut();
+                renames.insert(*id1, new_id);
+                *id1 = new_id;
+            }
+
+            Self::Phi(id, vals) => {
+                if !id.is_local() {
+                    for val in vals.iter_mut().filter(|val| !val.is_renamed()) {
+                        let cur_val = renames.get(val).unwrap();
+                        *val = *cur_val;
+                    }
+                }
+                let new_id = tmp.new_mut();
+                renames.insert(*id, new_id);
+                *id = new_id;
             }
         }
     }
