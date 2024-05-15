@@ -1,5 +1,5 @@
 use core::panic;
-use std::{collections::HashMap, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
     ast::{BinOp, UnOp},

@@ -16,8 +16,8 @@ pub fn optimize(method: &mut Method<'_>, default_string: Rc<str>) {
     let phis = method.phi_positions(&preds, &dom_frontiers);
 
     method.mem2reg(&preds, &dom_tree, phis);
-    method.dead_code_elimination();
     method.const_propagation(default_string, &dom_tree);
+    method.dead_code_elimination();
 }
 
 type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
@@ -238,53 +238,32 @@ impl<'a> Method<'a> {
         uses
     }
 
-    fn liveness_check(&self, preds: &Predecessors) -> IndexVec<BlockId, Vec<Id>> {
-        fn visit<'a>(
-            method: &Method<'a>,
-            block: BlockId,
-            local: Id,
-            decl_block: BlockId,
-            preds: &Predecessors,
-            live_out: &mut IndexVec<BlockId, Vec<Id>>,
-            live_in: &mut IndexVec<BlockId, Vec<Id>>,
-            visited: &mut IndexVec<BlockId, IndexVec<Id, bool>>,
-        ) {
-            if visited[block][local] {
-                return;
-            }
-            live_in[block].push(local);
-            visited[block][local] = true;
-            for pred in preds[block].iter().copied() {
-                live_out[pred].push(local);
-                if pred != decl_block {
-                    visit(
-                        method, pred, local, decl_block, preds, live_out, live_in, visited,
-                    );
-                }
-            }
-        }
-
+    fn liveness_check(
+        &self,
+        preds: &Predecessors,
+    ) -> (IndexVec<BlockId, Vec<Id>>, IndexVec<BlockId, Vec<Id>>) {
         let uses = self.all_uses();
         let mut live_out = index_vec![Vec::new(); self.blocks.len()];
         let mut live_in = index_vec![Vec::new(); self.blocks.len()];
         let mut visited = index_vec![index_vec![false; self.locals().len()]; self.blocks.len()];
 
-        for (local, (decl_block, blocks)) in uses.iter() {
-            for block in blocks {
-                visit(
-                    self,
-                    *block,
-                    local,
-                    *decl_block,
-                    preds,
-                    &mut live_out,
-                    &mut live_in,
-                    &mut visited,
-                );
+        for (local, (decl_block, mut blocks)) in uses.into_iter() {
+            while let Some(block) = blocks.pop() {
+                if visited[block][local] {
+                    continue;
+                }
+                live_in[block].push(local);
+                visited[block][local] = true;
+                for pred in preds[block].iter().copied() {
+                    live_out[pred].push(local);
+                    if pred != decl_block {
+                        blocks.push(pred);
+                    }
+                }
             }
         }
 
-        live_in
+        (live_in, live_out)
     }
 
     fn phi_positions(
@@ -293,23 +272,21 @@ impl<'a> Method<'a> {
         dom_frontiers: &DominanceFrontiers,
     ) -> PhiPositions {
         let mut phi_positions: PhiPositions = index_vec![vec![]; self.blocks.len()];
-        let liveness = self.liveness_check(preds);
+        let (live_in, _) = self.liveness_check(preds);
         let stores = self.all_stores();
 
         for (local, mut stores) in stores.into_iter().map(|(l, (_, s))| (l, s)) {
-            let mut visited = index_vec![false; self.blocks.len()];
             while let Some(block) = stores.pop() {
                 for frontier in dom_frontiers[block]
                     .iter()
-                    .filter(|frontier| liveness[**frontier].contains(&local))
+                    .filter(|frontier| live_in[**frontier].contains(&local))
                     .copied()
                 {
                     let phis = &mut phi_positions[frontier];
                     if !phis.iter().any(|(l, _, _)| *l == local) {
                         let ty = self.locals()[local].1;
                         phis.push((local, vec![local; preds[frontier].len()].into(), ty));
-                        if !visited[frontier] {
-                            visited[frontier] = true;
+                        if !stores.contains(&frontier) {
                             stores.push(frontier);
                         }
                     }
@@ -321,40 +298,29 @@ impl<'a> Method<'a> {
     }
 
     fn rename_locals(&mut self, preds: &Predecessors, dom_tree: &DominatorTree) {
-        fn rename_block(
-            method: &mut Method<'_>,
-            cur_name: &mut Id,
-            block: BlockId,
-            renames: &mut HashMap<Id, Id>,
-            dom_tree: &DominatorTree,
-            preds: &Predecessors,
-        ) {
-            for instr in method.blocks[block].instrs_mut() {
+        let mut renames = HashMap::new();
+        let mut cur_tmp = Id::Renamed(0);
+        let mut stack = vec![BlockId::ENTRY];
+
+        while let Some(block) = stack.pop() {
+            let cur_name: &mut Id = &mut cur_tmp;
+            let renames: &mut HashMap<Id, Id> = &mut renames;
+
+            for instr in self.blocks[block].instrs_mut() {
                 instr.kind.rename(renames, cur_name);
             }
 
-            method.successors_inner_visit(block, |s| {
+            self.successors_inner_visit(block, |s| {
                 let j = preds[s.id()].iter().position(|&p| p == block).unwrap();
                 for args in s.phis_args() {
                     args[j] = renames[&args[j]];
                 }
             });
 
-            for child in dom_tree[block].iter().copied() {
-                rename_block(method, cur_name, child, renames, dom_tree, preds);
+            for child in dom_tree[block].iter().copied().rev() {
+                stack.push(child);
             }
         }
-
-        let mut renames = HashMap::new();
-        let mut cur_tmp = Id::Renamed(0);
-        rename_block(
-            self,
-            &mut cur_tmp,
-            BlockId::ENTRY,
-            &mut renames,
-            dom_tree,
-            preds,
-        );
     }
 
     fn insert_phis(&mut self, phis: PhiPositions) {
@@ -370,14 +336,13 @@ impl<'a> Method<'a> {
 
     fn mem2reg(&mut self, preds: &Predecessors, dom_tree: &DominatorTree, phis: PhiPositions) {
         self.insert_phis(phis);
-        self.rename_locals(&preds, &dom_tree);
+        self.rename_locals(preds, dom_tree);
         self.set_labels();
     }
 
     fn dead_code_elimination(&mut self) {
         // contains the (use_count, decl_index, variables_used_in_decl)
-        let mut counter: HashMap<Id, (usize, Option<&mut InstrKind>, Option<Box<[Id]>>)> =
-            HashMap::new();
+        let mut counter = HashMap::new();
 
         for instr in self.instrs_mut().map(|instr| &mut instr.kind) {
             let (decl, used) = instr.uses();
@@ -410,7 +375,7 @@ impl<'a> Method<'a> {
             *instr = InstrKind::Nop;
             if let Some(used) = used {
                 for u in used.iter() {
-                    let (used, _, _) = counter.get_mut(&u).unwrap();
+                    let (used, _, _) = counter.get_mut(u).unwrap();
                     *used -= 1;
                 }
             }
@@ -569,7 +534,7 @@ impl<'a> Method<'a> {
         match val {
             Value::Int(val) => *instr = InstrKind::AssignInt(id, val),
             Value::Bool(val) => *instr = InstrKind::AssignBool(id, val),
-            Value::Str(val) => *instr = InstrKind::AssignStr(id, val.to_owned().into()),
+            Value::Str(val) => *instr = InstrKind::AssignStr(id, val),
             Value::Void => *instr = InstrKind::AssignDefault(id, TypeId::OBJECT),
             Value::Id(val) => *instr = InstrKind::Assign(id, val),
         }

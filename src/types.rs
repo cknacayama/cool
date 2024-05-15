@@ -1067,6 +1067,12 @@ impl<'a> IClassEnv<'a> {
     }
 }
 
+impl<'a> Default for IClassEnv<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

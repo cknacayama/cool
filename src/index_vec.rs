@@ -30,6 +30,10 @@ impl<K: Key, V> IndexVec<K, V> {
         self.values.extend(iter);
     }
 
+    pub fn capacity(&self) -> usize {
+        self.values.capacity()
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -98,6 +102,12 @@ impl<K: Key, V> IndexVec<K, V> {
 
     pub fn last_mut(&mut self) -> Option<&mut V> {
         self.values.last_mut()
+    }
+}
+
+impl<K: Key, V> Default for IndexVec<K, V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
