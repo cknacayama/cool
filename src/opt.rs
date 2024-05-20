@@ -11,7 +11,7 @@ use crate::{
     types::TypeId,
 };
 
-pub fn optimize(method: &mut Method<'_>, default_string: Rc<str>) {
+pub fn optimize(method: &mut Method<'_>, default_string: &Rc<str>) {
     let preds = method.predecessors();
     let idoms = method.idoms(&preds);
     let dom_tree = method.dom_tree(&idoms);
@@ -21,11 +21,11 @@ pub fn optimize(method: &mut Method<'_>, default_string: Rc<str>) {
 
     method.mem2reg(&preds, &dom_tree, phis);
 
-    // todo!
-    // make this less brute force
-    while method.const_propagation(default_string.clone()) {
+    let now = std::time::Instant::now();
+    while method.const_propagation(default_string) {
         method.dead_code_elimination();
     }
+    println!("const_propagation: {:?}", now.elapsed());
 
     method.set_labels();
 }
@@ -538,9 +538,55 @@ impl<'a> Method<'a> {
             })
             .collect();
         self.remove_unecessary_phis(&undeclared_vars);
+        self.merge_blocks();
     }
 
-    fn const_propagation(&mut self, default_string: Rc<str>) -> bool {
+    fn merge_blocks(&mut self) -> bool {
+        let mut first = BlockId::ENTRY;
+        let mut last = BlockId::ENTRY;
+        let mut new_blocks = index_vec![None; self.blocks.len()];
+
+        let method_instr = self.instrs().next().unwrap().clone();
+
+        for (id, block) in self.blocks.iter() {
+            if block.can_merge() {
+                last = id;
+            } else {
+                if first != last {
+                    for block in (first.to_index()..last.to_index()).map(BlockId::from_index) {
+                        new_blocks[block] = Some(last);
+                    }
+                }
+                first = BlockId::from_index(id.to_index() + 1);
+                last = first;
+            }
+        }
+
+        let len = self.blocks.len();
+
+        self.blocks.retain(|block| new_blocks[block.id()].is_none());
+
+        let removed = len != self.blocks.len();
+
+        if removed {
+            for (id, block) in self.blocks.iter_mut() {
+                let block_id = block.id();
+                for (_, new_name) in new_blocks.iter_mut().filter(|(_, v)| **v == Some(block_id)) {
+                    *new_name = Some(id);
+                }
+                block.id = id;
+                new_blocks[block_id] = Some(id);
+            }
+            self.rename_blocks(&new_blocks);
+            if method_instr.kind != self.instrs().next().unwrap().kind {
+                self.push_front(BlockId::ENTRY, method_instr);
+            }
+        }
+
+        removed
+    }
+
+    fn const_propagation(&mut self, default_string: &Rc<str>) -> bool {
         let mut values = HashMap::new();
         let mut work_list = self.block_ids().collect::<VecDeque<_>>();
         let mut changed = false;
@@ -548,7 +594,7 @@ impl<'a> Method<'a> {
 
         while let Some(block) = work_list.pop_front() {
             for instr in self.blocks[block].instrs_mut().map(|instr| &mut instr.kind) {
-                if let Some(used) = instr.const_fold(&mut values, &uses, &default_string) {
+                if let Some(used) = instr.const_fold(&mut values, &uses, default_string) {
                     changed = true;
                     work_list.extend(used);
                 }

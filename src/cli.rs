@@ -187,7 +187,7 @@ impl Config {
                 }
                 let default_string = ir_builder.strings().get("").unwrap().clone();
                 for method in ir_builder.methods_mut() {
-                    opt::optimize(method, default_string.clone());
+                    opt::optimize(method, &default_string);
                 }
                 let mut output = String::new();
                 for ir in ir_builder.instrs().map(|instr| &instr.kind) {

@@ -55,17 +55,13 @@ impl<'a> Block<'a> {
         }
     }
 
-    pub fn is_dead(&self) -> bool {
-        for instr in self.instrs.iter() {
-            if !matches!(
-                instr.kind,
-                InstrKind::Nop | InstrKind::Label(_) | InstrKind::Jmp(_)
-            ) {
-                return false;
-            }
-        }
-
-        true
+    pub fn can_merge(&self) -> bool {
+        !self.instrs.iter().any(|i| {
+            !matches!(
+                i.kind,
+                InstrKind::Jmp(_) | InstrKind::Label(_) | InstrKind::Nop
+            )
+        })
     }
 
     pub fn id(&self) -> BlockId {
@@ -153,6 +149,10 @@ impl<'a> Method<'a> {
 
     pub fn local_ids(&self) -> impl Iterator<Item = Id> {
         (0..self.locals.len() as u32).map(Id::Local)
+    }
+
+    pub fn instrs_with_nops(&self) -> impl Iterator<Item = &Instr<'a>> {
+        self.blocks.iter().flat_map(|(_, b)| b.instrs.iter())
     }
 
     pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
@@ -347,6 +347,10 @@ impl<'a> IrBuilder<'a> {
 
     pub fn methods_mut(&mut self) -> &mut [Method<'a>] {
         &mut self.methods
+    }
+
+    pub fn instrs_with_nops(&self) -> impl Iterator<Item = &Instr<'a>> {
+        self.methods.iter().flat_map(|m| m.instrs_with_nops())
     }
 
     pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
