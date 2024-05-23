@@ -46,13 +46,14 @@ pub enum InstrKind<'a> {
     AssignBin(BinOp, Id, Value, Value),
     AssignUn(UnOp, Id, Id),
     AssignToObj(Id, TypeId, Value),
-    AssignDispatch(Id, Value, &'a str, Box<[(TypeId, Value)]>),
-    AssignStaticDispatch(Id, Value, TypeId, &'a str, Box<[(TypeId, Value)]>),
+    AssignCall(Id, Id, Box<[(TypeId, Value)]>),
+    AssignStaticCall(Id, TypeId, &'a str, Box<[(TypeId, Value)]>),
+    AssignExtract(Id, Id, usize),
     Phi(Id, Vec<(Value, BlockId)>),
 
     // before mem2reg
     Local(TypeId, Id),
-    AssignLoad(Id, TypeId, Id),
+    AssignLoad(Id, TypeId, Id, usize),
     Store(Id, TypeId, Value),
     Attr(TypeId, Id),
 }
@@ -62,6 +63,13 @@ impl<'a> InstrKind<'a> {
         matches!(
             self,
             Self::Return(_) | Self::Jmp(_) | Self::JmpCond(_, _, _)
+        )
+    }
+
+    pub fn is_call(&self) -> bool {
+        matches!(
+            self,
+            Self::AssignCall(_, _, _) | Self::AssignStaticCall(_, _, _, _)
         )
     }
 
@@ -104,36 +112,39 @@ impl<'a> InstrKind<'a> {
             | Self::Assign(id1, Value::Id(id2))
             | Self::AssignUn(_, id1, id2)
             | Self::AssignToObj(id1, _, Value::Id(id2))
-            | Self::AssignLoad(id1, _, id2) => (Some(*id1), Some([*id2].into())),
+            | Self::AssignLoad(id1, _, id2, _)
+            | Self::AssignExtract(id1, id2, _) => (Some(*id1), Some([*id2].into())),
 
             Self::Assign(id1, _) | Self::AssignToObj(id1, _, _) | Self::AssignBin(_, id1, _, _) => {
                 (Some(*id1), None)
             }
 
-            Self::AssignDispatch(id1, id2, _, args)
-            | Self::AssignStaticDispatch(id1, id2, _, _, args) => {
-                let start_vec = match id2 {
-                    Value::Id(id) => vec![*id],
-                    _ => vec![],
-                };
-                (
-                    Some(*id1),
-                    Some(
-                        args.iter()
-                            .filter_map(|(_, val)| {
-                                if let Value::Id(id) = val {
-                                    Some(*id)
-                                } else {
-                                    None
-                                }
-                            })
-                            .fold(start_vec, |mut vars, id| {
-                                vars.push(id);
-                                vars
-                            })
-                            .into(),
-                    ),
-                )
+            Self::AssignCall(id1, id2, args) => {
+                let used_ids = args
+                    .iter()
+                    .filter_map(|(_, val)| match val {
+                        Value::Id(id) => Some(*id),
+                        _ => None,
+                    })
+                    .fold(vec![*id2], |mut vars, id| {
+                        vars.push(id);
+                        vars
+                    });
+                (Some(*id1), Some(used_ids.into_boxed_slice()))
+            }
+
+            Self::AssignStaticCall(id1, _, _, args) => {
+                let used_ids = args
+                    .iter()
+                    .filter_map(|(_, val)| match val {
+                        Value::Id(id) => Some(*id),
+                        _ => None,
+                    })
+                    .fold(vec![], |mut vars, id| {
+                        vars.push(id);
+                        vars
+                    });
+                (Some(*id1), Some(used_ids.into_boxed_slice()))
             }
 
             Self::Phi(id, vals) => (
@@ -176,8 +187,8 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
             InstrKind::AssignUn(op, id, val) => {
                 write!(f, "    {} = {} {}", id, op.to_ir_string(), val)
             }
-            InstrKind::AssignDispatch(id, obj, name, args) => {
-                write!(f, "    {} = dispatch {}.{}(", id, obj, name)?;
+            InstrKind::AssignCall(id, func, args) => {
+                write!(f, "    {} = call {}(", id, func)?;
                 for (i, arg) in args.iter().enumerate() {
                     write!(f, "{} {}", arg.0, arg.1)?;
                     if i != args.len() - 1 {
@@ -186,8 +197,8 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
                 }
                 write!(f, ")")
             }
-            InstrKind::AssignStaticDispatch(id, obj, ty, name, args) => {
-                write!(f, "    {} = dispatch {} @ {}.{}(", id, obj, ty, name).unwrap();
+            InstrKind::AssignStaticCall(id, ty, name, args) => {
+                write!(f, "    {} = dispatch {}_{}(", id, ty, name)?;
                 for (i, arg) in args.iter().enumerate() {
                     write!(f, "{} {}", arg.0, arg.1)?;
                     if i != args.len() - 1 {
@@ -198,6 +209,9 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
             }
             InstrKind::AssignToObj(id, ty, val) => {
                 write!(f, "    {} = cast {}, {}", id, ty, val)
+            }
+            InstrKind::AssignExtract(id, obj, index) => {
+                write!(f, "    {} = extract {}, {}", id, obj, index)
             }
             InstrKind::Phi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
@@ -210,7 +224,9 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
                 Ok(())
             }
             InstrKind::Local(ty, name) => write!(f, "    local {} {}", ty, name),
-            InstrKind::AssignLoad(id, ty, name) => write!(f, "    {} = load {} {}", id, ty, name),
+            InstrKind::AssignLoad(id, ty, name, offset) => {
+                write!(f, "    {} = load {} {}, {}", id, ty, name, offset)
+            }
             InstrKind::Store(name, ty, id) => write!(f, "    store {}, {} {}", name, ty, id),
             InstrKind::Attr(ty, name) => write!(f, "    attr {} {}", ty, name),
         }

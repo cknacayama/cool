@@ -21,11 +21,9 @@ pub fn optimize(method: &mut Method<'_>, default_string: &Rc<str>) {
 
     method.mem2reg(&preds, &dom_tree, phis);
 
-    let now = std::time::Instant::now();
     while method.const_propagation(default_string) {
         method.dead_code_elimination();
     }
-    println!("const_propagation: {:?}", now.elapsed());
 
     method.set_labels();
 }
@@ -295,7 +293,7 @@ impl<'a> Method<'a> {
     fn all_stores(&self) -> IndexVec<Id, (&Block<'a>, Vec<BlockId>)> {
         let mut stores = IndexVec::with_capacity(self.locals().len());
 
-        for local_block in self.locals().iter().map(|(_, (_, _, block))| *block) {
+        for local_block in self.locals().iter().map(|(_, (_, block))| *block) {
             stores.push((self.blocks.get(local_block).unwrap(), vec![]));
         }
 
@@ -399,7 +397,7 @@ impl<'a> Method<'a> {
                 {
                     let phis = &mut phi_positions[frontier];
                     if !phis.iter().any(|(l, _, _)| *l == local) {
-                        let ty = self.locals()[local].1;
+                        let ty = self.locals()[local].0;
                         phis.push((
                             local,
                             vec![(local, frontier); preds[frontier].len()].into(),
@@ -510,15 +508,13 @@ impl<'a> Method<'a> {
             }
         }
 
-        while let Some(id) = counter.iter().find_map(
-            |(id, (use_count, _, _, _))| {
-                if *use_count == 0 {
-                    Some(*id)
-                } else {
-                    None
-                }
-            },
-        ) {
+        while let Some(id) = counter.iter().find_map(|(id, (use_count, _, i, _))| {
+            if *use_count == 0 && !i.as_ref().unwrap().is_call() {
+                Some(*id)
+            } else {
+                None
+            }
+        }) {
             let (_, _, instr, used) = counter.remove(&id).unwrap();
             let instr = instr.unwrap();
             instr.replace_with_nop();
@@ -649,7 +645,7 @@ impl<'a> InstrKind<'a> {
                 }
             },
 
-            Self::AssignLoad(id1, _, id2) if id2.is_ptr() => {
+            Self::AssignLoad(id1, _, id2, _) if id2.is_ptr() => {
                 let cur_id2 = renames.get(id2).unwrap();
                 *id2 = *cur_id2;
                 let new_id = tmp.next_mut();
@@ -657,7 +653,7 @@ impl<'a> InstrKind<'a> {
                 *id1 = new_id;
             }
 
-            Self::AssignLoad(id1, _, id2) => {
+            Self::AssignLoad(id1, _, id2, _) => {
                 let cur_id2 = *renames.get(id2).unwrap();
                 let new_id = tmp.next_mut();
                 renames.insert(*id1, new_id);
@@ -686,12 +682,9 @@ impl<'a> InstrKind<'a> {
                 *id1 = new_id;
             }
 
-            Self::AssignDispatch(id1, val, _, args)
-            | Self::AssignStaticDispatch(id1, val, _, _, args) => {
-                if let Value::Id(id2) = val {
-                    let cur_id2 = renames.get(id2).unwrap();
-                    *val = Value::Id(*cur_id2);
-                }
+            Self::AssignCall(id1, id2, args) => {
+                let cur_id2 = renames.get(id2).unwrap();
+                *id2 = *cur_id2;
                 for id in args.iter_mut().filter_map(|(_, val)| match val {
                     Value::Id(id) => Some(id),
                     _ => None,
@@ -699,6 +692,27 @@ impl<'a> InstrKind<'a> {
                     let cur_id = renames.get(id).unwrap();
                     *id = *cur_id;
                 }
+                let new_id = tmp.next_mut();
+                renames.insert(*id1, new_id);
+                *id1 = new_id;
+            }
+
+            Self::AssignStaticCall(id1, _, _, args) => {
+                for id in args.iter_mut().filter_map(|(_, val)| match val {
+                    Value::Id(id) => Some(id),
+                    _ => None,
+                }) {
+                    let cur_id = renames.get(id).unwrap();
+                    *id = *cur_id;
+                }
+                let new_id = tmp.next_mut();
+                renames.insert(*id1, new_id);
+                *id1 = new_id;
+            }
+
+            Self::AssignExtract(id1, id2, _) => {
+                let cur_id2 = renames.get(id2).unwrap();
+                *id2 = *cur_id2;
                 let new_id = tmp.next_mut();
                 renames.insert(*id1, new_id);
                 *id1 = new_id;
@@ -798,18 +812,21 @@ impl<'a> InstrKind<'a> {
                 self.const_fold_jmp_cond(values, id, on_true, on_false);
                 None
             }
-            InstrKind::AssignDispatch(_, id2, _, args) => {
+            InstrKind::AssignCall(_, id, args) => {
                 for arg in args.iter_mut().map(|(_, id)| id) {
                     Self::try_replace(values, arg);
                 }
-                Self::try_replace(values, id2);
+                Self::replace_id(values, id);
                 None
             }
-            InstrKind::AssignStaticDispatch(_, id2, _, _, args) => {
+            InstrKind::AssignStaticCall(_, _, _, args) => {
                 for arg in args.iter_mut().map(|(_, id)| id) {
                     Self::try_replace(values, arg);
                 }
-                Self::try_replace(values, id2);
+                None
+            }
+            InstrKind::AssignExtract(_, id, _) => {
+                Self::replace_id(values, id);
                 None
             }
             InstrKind::Phi(_, vals) => {

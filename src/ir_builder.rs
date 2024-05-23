@@ -115,7 +115,7 @@ pub struct Method<'a> {
     id:          &'a str,
     pub blocks:  IndexVec<BlockId, Block<'a>>,
     cur_locals:  Vec<HashMap<&'a str, Id>>,
-    locals:      IndexVec<Id, (&'a str, TypeId, BlockId)>,
+    locals:      IndexVec<Id, (TypeId, BlockId)>,
     pub cur_tmp: u32,
 }
 
@@ -143,7 +143,7 @@ impl<'a> Method<'a> {
         self.blocks[block].push_front(instr)
     }
 
-    pub fn locals(&self) -> &IndexVec<Id, (&'a str, TypeId, BlockId)> {
+    pub fn locals(&self) -> &IndexVec<Id, (TypeId, BlockId)> {
         &self.locals
     }
 
@@ -294,7 +294,7 @@ impl<'a> Method<'a> {
         let local = self.locals.len() as u32;
         let id = Id::Local(local);
         self.cur_scope_mut().insert(name, id);
-        self.locals.push((name, ty, self.cur_block()));
+        self.locals.push((ty, self.cur_block()));
         id
     }
 
@@ -303,7 +303,7 @@ impl<'a> Method<'a> {
         let local = self.locals.len() as u32;
         let id = Id::Ptr(local);
         self.cur_scope_mut().insert(name, id);
-        self.locals.push((name, ty, self.cur_block()));
+        self.locals.push((ty, self.cur_block()));
         id
     }
 
@@ -391,6 +391,10 @@ impl<'a> IrBuilder<'a> {
 
     fn new_tmp(&mut self) -> Id {
         self.cur_method_mut().new_tmp()
+    }
+
+    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> Id {
+        self.cur_method_mut().new_ptr(name, ty)
     }
 
     fn begin_block(&mut self, span: Span) -> BlockId {
@@ -510,7 +514,7 @@ impl<'a> IrBuilder<'a> {
             TEK::Id(id) => {
                 let tmp = self.new_tmp();
                 let id = self.get_local(id);
-                let kind = InstrKind::AssignLoad(tmp, ty, id);
+                let kind = InstrKind::AssignLoad(tmp, ty, id, 0);
                 self.push_instr(kind, span, ty);
                 (tmp, ty)
             }
@@ -536,7 +540,8 @@ impl<'a> IrBuilder<'a> {
 
                 let tmp2 = self.new_tmp();
                 let tmp1 = Value::Id(tmp1);
-                let kind = InstrKind::AssignStaticDispatch(tmp2, tmp1, ty, "New", Box::new([]));
+                let kind =
+                    InstrKind::AssignStaticCall(tmp2, ty, "New", Box::new([(TypeId::INT, tmp1)]));
                 self.push_instr(kind, span, ty);
                 (tmp2, ty)
             }
@@ -552,7 +557,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::SelfId => {
                 let tmp = self.new_tmp();
-                let kind = InstrKind::AssignLoad(tmp, self.cur_class, Id::LOCAL_SELF);
+                let kind = InstrKind::AssignLoad(tmp, self.cur_class, Id::LOCAL_SELF, 0);
                 self.push_instr(kind, span, ty);
                 (tmp, ty)
             }
@@ -688,26 +693,42 @@ impl<'a> IrBuilder<'a> {
             .unwrap()
             .params()
             .to_vec();
-        let args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, method_params);
 
         let tmp1 = self.new_tmp();
-        let kind = InstrKind::AssignLoad(tmp1, self.cur_class, Id::LOCAL_SELF);
+        let kind = InstrKind::AssignLoad(tmp1, self.cur_class, Id::LOCAL_SELF, 0);
         self.push_instr(kind, span, self.cur_class);
+        args[0] = (self.cur_class, Value::Id(tmp1));
 
-        let tmp2 = self.new_tmp();
-        let tmp1 = Value::Id(tmp1);
-        let kind = InstrKind::AssignDispatch(tmp2, tmp1, method_name, args.into_boxed_slice());
+        let ptr = self.new_ptr("VTable", TypeId::INT);
+        let kind = InstrKind::AssignExtract(ptr, tmp1, 1);
+        self.push_instr(kind, span, TypeId::INT);
+
+        let offset = self
+            .env
+            .get_class(self.cur_class)
+            .unwrap()
+            .get_vtable_offset(method_name)
+            .unwrap();
+
+        let tmp3 = self.new_tmp();
+        let kind = InstrKind::AssignLoad(tmp3, TypeId::INT, ptr, offset);
+        self.push_instr(kind, span, TypeId::INT);
+
+        let tmp4 = self.new_tmp();
+        let kind = InstrKind::AssignCall(tmp4, tmp3, args.into_boxed_slice());
         self.push_instr(kind, span, ty);
 
-        (tmp2, ty)
+        (tmp4, ty)
     }
 
+    /// first argument is 'empty'
     fn build_args(
         &mut self,
         args: Box<[TypedExpr<'a>]>,
         params: Vec<TypeId>,
     ) -> Vec<(TypeId, Value)> {
-        let mut arg_ids = vec![];
+        let mut arg_ids = vec![(TypeId::SelfType, Value::Int(0))];
         for (arg, param) in args.into_vec().into_iter().zip(params) {
             let arg_span = arg.span;
             let (arg, arg_ty) = self.build_expr(arg);
@@ -727,7 +748,7 @@ impl<'a> IrBuilder<'a> {
         ty: TypeId,
         span: Span,
     ) -> (Id, TypeId) {
-        let (expr, expr_ty) = self.build_expr(expr);
+        let expr_ty = expr.ty;
 
         let method_params = self
             .env
@@ -736,14 +757,31 @@ impl<'a> IrBuilder<'a> {
             .params()
             .to_vec();
 
-        let args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, method_params);
 
-        let tmp = self.new_tmp();
-        let expr = Value::Id(expr);
-        let kind = InstrKind::AssignDispatch(tmp, expr, method_name, args.into_boxed_slice());
+        let (expr, _) = self.build_expr(expr);
+        args[0] = (expr_ty, Value::Id(expr));
+
+        let ptr = self.new_ptr("VTable", TypeId::INT);
+        let kind = InstrKind::AssignExtract(ptr, expr, 1);
+        self.push_instr(kind, span, expr_ty);
+
+        let offset = self
+            .env
+            .get_class(self.cur_class)
+            .unwrap()
+            .get_vtable_offset(method_name)
+            .unwrap();
+
+        let tmp2 = self.new_tmp();
+        let kind = InstrKind::AssignLoad(tmp2, TypeId::INT, ptr, offset);
+        self.push_instr(kind, span, TypeId::INT);
+
+        let tmp3 = self.new_tmp();
+        let kind = InstrKind::AssignCall(tmp3, tmp2, args.into_boxed_slice());
         self.push_instr(kind, span, ty);
 
-        (tmp, ty)
+        (tmp3, ty)
     }
 
     fn build_static_dispatch(
@@ -762,13 +800,13 @@ impl<'a> IrBuilder<'a> {
             .params()
             .to_vec();
 
-        let args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, method_params);
 
         let (expr, _) = self.build_expr(expr);
+        args[0] = (ty, Value::Id(expr));
+
         let tmp = self.new_tmp();
-        let expr = Value::Id(expr);
-        let kind =
-            InstrKind::AssignStaticDispatch(tmp, expr, ty, method_name, args.into_boxed_slice());
+        let kind = InstrKind::AssignStaticCall(tmp, ty, method_name, args.into_boxed_slice());
         self.push_instr(kind, span, result_ty);
 
         (tmp, result_ty)
