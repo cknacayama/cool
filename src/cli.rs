@@ -2,9 +2,8 @@ use std::{io, path::PathBuf};
 
 use crate::{
     checker::{MultiPassChecker, SemanticError, TypeChecker},
-    ir_builder::IrBuilder,
+    ir::{builder::IrBuilder, opt},
     lexer::Lexer,
-    opt,
     parser::Parser,
 };
 

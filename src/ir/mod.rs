@@ -1,10 +1,13 @@
-use core::panic;
+pub mod block;
+pub mod builder;
+pub mod opt;
+
 use std::rc::Rc;
 
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::Key,
-    ir_builder::BlockId,
+    ir::block::BlockId,
     span::Span,
     types::TypeId,
 };
@@ -12,7 +15,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Void,
-    Id(Id),
+    Id(IrId),
     Int(i64),
     Bool(bool),
     Str(Rc<str>),
@@ -35,27 +38,27 @@ pub enum InstrKind<'a> {
     Nop,
 
     Method(TypeId, &'a str, TypeId, usize),
-    Param(TypeId, Id),
+    Param(TypeId, IrId),
     Return(Value),
     Label(BlockId),
     Jmp(BlockId),
     /// (src, on_true, on_false)
-    JmpCond(Id, BlockId, BlockId),
-    Assign(Id, Value),
-    AssignDefault(Id, TypeId),
-    AssignBin(BinOp, Id, Value, Value),
-    AssignUn(UnOp, Id, Id),
-    AssignToObj(Id, TypeId, Value),
-    AssignCall(Id, Id, Box<[(TypeId, Value)]>),
-    AssignStaticCall(Id, TypeId, &'a str, Box<[(TypeId, Value)]>),
-    AssignExtract(Id, Id, usize),
-    Phi(Id, Vec<(Value, BlockId)>),
+    JmpCond(IrId, BlockId, BlockId),
+    Assign(IrId, Value),
+    AssignDefault(IrId, TypeId),
+    AssignBin(BinOp, IrId, Value, Value),
+    AssignUn(UnOp, IrId, IrId),
+    AssignToObj(IrId, TypeId, Value),
+    AssignCall(IrId, IrId, Box<[(TypeId, Value)]>),
+    AssignStaticCall(IrId, TypeId, &'a str, Box<[(TypeId, Value)]>),
+    AssignExtract(IrId, IrId, usize),
+    Phi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
-    Local(TypeId, Id),
-    AssignLoad(Id, TypeId, Id, usize),
-    Store(Id, TypeId, Value),
-    Attr(TypeId, Id),
+    Local(TypeId, IrId),
+    AssignLoad(IrId, TypeId, IrId, usize),
+    Store(IrId, TypeId, Value),
+    Attr(TypeId, IrId),
 }
 
 impl<'a> InstrKind<'a> {
@@ -77,7 +80,7 @@ impl<'a> InstrKind<'a> {
         matches!(self, Self::Nop)
     }
 
-    pub fn uses(&self) -> (Option<Id>, Option<Box<[Id]>>) {
+    pub fn uses(&self) -> (Option<IrId>, Option<Box<[IrId]>>) {
         match self {
             Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => (None, None),
 
@@ -251,46 +254,58 @@ impl<'a> Instr<'a> {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalId(u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Id {
+pub enum IrId {
     Tmp(u32),
-    Local(u32),
     Renamed(u32),
-    Ptr(u32),
+    Local(LocalId),
+    Ptr(LocalId),
 }
 
-impl Id {
-    pub const LOCAL_SELF: Self = Self::Local(0);
+impl IrId {
+    pub const LOCAL_SELF: Self = Self::Local(LocalId(0));
 
-    pub fn is_local(&self) -> bool {
-        matches!(self, Self::Local(_))
-    }
-
-    pub fn is_tmp(&self) -> bool {
-        matches!(self, Self::Tmp(_))
-    }
-
-    pub fn is_ptr(&self) -> bool {
-        matches!(self, Self::Ptr(_))
-    }
-
-    pub fn is_renamed(&self) -> bool {
-        matches!(self, Self::Renamed(_))
-    }
-
-    pub fn get_subs(&self) -> u32 {
+    pub fn local_id(self) -> Option<LocalId> {
         match self {
-            Self::Tmp(subs) | Self::Local(subs) | Self::Renamed(subs) | Self::Ptr(subs) => *subs,
+            Self::Local(id) | Self::Ptr(id) => Some(id),
+            _ => None,
         }
     }
 
-    pub fn next(&self) -> Self {
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
+    pub fn is_tmp(self) -> bool {
+        matches!(self, Self::Tmp(_))
+    }
+
+    pub fn is_ptr(self) -> bool {
+        matches!(self, Self::Ptr(_))
+    }
+
+    pub fn is_renamed(self) -> bool {
+        matches!(self, Self::Renamed(_))
+    }
+
+    pub fn get_subs(self) -> u32 {
+        match self {
+            Self::Tmp(subs)
+            | Self::Local(LocalId(subs))
+            | Self::Ptr(LocalId(subs))
+            | Self::Renamed(subs) => subs,
+        }
+    }
+
+    pub fn next(self) -> Self {
         match self {
             Self::Tmp(index) => Self::Tmp(index + 1),
-            Self::Local(index) => Self::Local(index + 1),
+            Self::Local(LocalId(index)) => Self::Local(LocalId(index + 1)),
+            Self::Ptr(LocalId(index)) => Self::Ptr(LocalId(index + 1)),
             Self::Renamed(index) => Self::Renamed(index + 1),
-            Self::Ptr(index) => Self::Ptr(index + 1),
         }
     }
 
@@ -300,26 +315,23 @@ impl Id {
     }
 }
 
-impl std::fmt::Display for Id {
+impl std::fmt::Display for IrId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tmp(subs) => write!(f, "$t{}", subs),
-            Self::Local(subs) => write!(f, "$l{}", subs),
-            Self::Renamed(subs) => write!(f, "$r{}", subs),
-            Self::Ptr(subs) => write!(f, "$p{}", subs),
+            Self::Tmp(subs) => write!(f, "%{}", subs),
+            Self::Local(LocalId(subs)) => write!(f, "%l{}", subs),
+            Self::Ptr(LocalId(subs)) => write!(f, "%p{}", subs),
+            Self::Renamed(subs) => write!(f, "%{}", subs),
         }
     }
 }
 
-impl Key for Id {
+impl Key for LocalId {
     fn to_index(self) -> usize {
-        match self {
-            Self::Ptr(id) | Self::Local(id) => id as usize,
-            _ => panic!("cannot index this id"),
-        }
+        self.0 as usize
     }
 
     fn from_index(index: usize) -> Self {
-        Self::Local(index as u32)
+        Self(index as u32)
     }
 }

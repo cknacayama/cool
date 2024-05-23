@@ -6,8 +6,11 @@ use std::{
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::{index_vec, IndexVec, Key},
-    ir::{Id, Instr, InstrKind, Value},
-    ir_builder::{Block, BlockId, Method},
+    ir::{
+        block::{Block, BlockId},
+        builder::Method,
+        Instr, InstrKind, IrId, LocalId, Value,
+    },
     types::TypeId,
 };
 
@@ -21,9 +24,7 @@ pub fn optimize(method: &mut Method<'_>, default_string: &Rc<str>) {
 
     method.mem2reg(&preds, &dom_tree, phis);
 
-    while method.const_propagation(default_string) {
-        method.dead_code_elimination();
-    }
+    while method.const_propagation(default_string) | method.dead_code_elimination() {}
 
     method.set_labels();
 }
@@ -32,7 +33,7 @@ type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
 type ImmediateDominators = IndexVec<BlockId, BlockId>;
 type DominatorTree = IndexVec<BlockId, Vec<BlockId>>;
 type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
-type PhiPositions = IndexVec<BlockId, Vec<(Id, Box<[(Id, BlockId)]>, TypeId)>>;
+type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
 
 impl<'a> Method<'a> {
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
@@ -114,11 +115,15 @@ impl<'a> Method<'a> {
         removed
     }
 
-    fn remove_unecessary_phis(&mut self, undeclared_vars: &HashSet<Id>) {
+    fn remove_unecessary_phis(&mut self, undeclared_vars: &HashSet<IrId>) -> bool {
+        let mut changed = false;
         for instr in self.instrs_mut() {
             if let InstrKind::Phi(ref id, ref mut vals) = instr.kind {
                 vals.retain(|(val, _)| match val {
-                    Value::Id(id) => !undeclared_vars.contains(id),
+                    Value::Id(id) if undeclared_vars.contains(id) => {
+                        changed = true;
+                        false
+                    }
                     _ => true,
                 });
                 if vals.is_empty() {
@@ -131,6 +136,7 @@ impl<'a> Method<'a> {
                 }
             }
         }
+        changed
     }
 
     fn rename_blocks(&mut self, new_blocks: &IndexVec<BlockId, Option<BlockId>>) {
@@ -290,7 +296,7 @@ impl<'a> Method<'a> {
         frontiers
     }
 
-    fn all_stores(&self) -> IndexVec<Id, (&Block<'a>, Vec<BlockId>)> {
+    fn all_stores(&self) -> IndexVec<LocalId, (&Block<'a>, Vec<BlockId>)> {
         let mut stores = IndexVec::with_capacity(self.locals().len());
 
         for local_block in self.locals().iter().map(|(_, (_, block))| *block) {
@@ -300,7 +306,7 @@ impl<'a> Method<'a> {
         for (block_id, block) in self.blocks.iter() {
             for instr in block.instrs.iter() {
                 if let InstrKind::Store(local, _, _) = instr.kind {
-                    stores[local].1.push(block_id);
+                    stores[local.local_id().unwrap()].1.push(block_id);
                 }
             }
         }
@@ -308,20 +314,17 @@ impl<'a> Method<'a> {
         stores
     }
 
-    fn all_locals_uses(&self) -> IndexVec<Id, (BlockId, Vec<BlockId>)> {
+    fn all_locals_uses(&self) -> IndexVec<LocalId, (BlockId, Vec<BlockId>)> {
         let mut uses = index_vec![(BlockId::ENTRY, vec![]); self.locals().len()];
 
         for (block_id, block) in self.blocks.iter() {
             for instr in block.instrs.iter() {
                 let (decl, used) = instr.kind.uses();
-                match decl {
-                    Some(decl) if decl.is_local() => {
-                        uses[decl].0 = block_id;
-                    }
-                    _ => {}
+                if let Some(decl) = decl.and_then(|id| id.local_id()) {
+                    uses[decl].0 = block_id;
                 }
                 if let Some(used) = used {
-                    for u in used.into_vec().into_iter().filter(|u| u.is_local()) {
+                    for u in used.into_vec().into_iter().filter_map(|id| id.local_id()) {
                         uses[u].1.push(block_id);
                     }
                 }
@@ -331,7 +334,7 @@ impl<'a> Method<'a> {
         uses
     }
 
-    fn all_uses(&self) -> HashMap<Id, (BlockId, Vec<BlockId>)> {
+    fn all_uses(&self) -> HashMap<IrId, (BlockId, Vec<BlockId>)> {
         let mut uses = HashMap::new();
 
         for (block_id, block) in self.blocks.iter() {
@@ -354,7 +357,10 @@ impl<'a> Method<'a> {
     fn liveness_check(
         &self,
         preds: &Predecessors,
-    ) -> (IndexVec<BlockId, Vec<Id>>, IndexVec<BlockId, Vec<Id>>) {
+    ) -> (
+        IndexVec<BlockId, Vec<LocalId>>,
+        IndexVec<BlockId, Vec<LocalId>>,
+    ) {
         let uses = self.all_locals_uses();
         let mut live_out = index_vec![Vec::new(); self.blocks.len()];
         let mut live_in = index_vec![Vec::new(); self.blocks.len()];
@@ -414,12 +420,12 @@ impl<'a> Method<'a> {
         phi_positions
     }
 
-    fn rename_locals(&mut self, preds: &Predecessors, dom_tree: &DominatorTree) {
+    fn rename_ids(&mut self, preds: &Predecessors, dom_tree: &DominatorTree) {
         fn rename(
             method: &mut Method<'_>,
             block: BlockId,
-            renames: &mut HashMap<Id, Id>,
-            cur_tmp: &mut Id,
+            renames: &mut HashMap<IrId, IrId>,
+            cur_tmp: &mut IrId,
             preds: &Predecessors,
             dom_tree: &DominatorTree,
         ) {
@@ -447,7 +453,7 @@ impl<'a> Method<'a> {
         }
 
         let mut renames = HashMap::new();
-        let mut cur_tmp = Id::Renamed(0);
+        let mut cur_tmp = IrId::Renamed(0);
 
         rename(
             self,
@@ -464,10 +470,10 @@ impl<'a> Method<'a> {
             let span = self.blocks[block].instrs.front().unwrap().span;
             for (local, args, ty) in phis {
                 let kind = InstrKind::Phi(
-                    local,
+                    IrId::Local(local),
                     args.into_vec()
                         .into_iter()
-                        .map(|(val, block)| (Value::Id(val), block))
+                        .map(|(val, block)| (Value::Id(IrId::Local(val)), block))
                         .collect(),
                 );
                 let instr = Instr::new(kind, span, ty, block);
@@ -478,12 +484,11 @@ impl<'a> Method<'a> {
 
     fn mem2reg(&mut self, preds: &Predecessors, dom_tree: &DominatorTree, phis: PhiPositions) {
         self.insert_phis(phis);
-        self.rename_locals(preds, dom_tree);
-        // self.set_labels();
+        self.rename_ids(preds, dom_tree);
     }
 
-    fn dead_code_elimination(&mut self) {
-        self.remove_dead_blocks();
+    fn dead_code_elimination(&mut self) -> bool {
+        let mut res = self.remove_dead_blocks();
 
         // contains the (use_count, decl_block, decl_ref, variables_used_in_decl)
         let mut counter = HashMap::new();
@@ -515,6 +520,7 @@ impl<'a> Method<'a> {
                 None
             }
         }) {
+            res = true;
             let (_, _, instr, used) = counter.remove(&id).unwrap();
             let instr = instr.unwrap();
             instr.replace_with_nop();
@@ -533,8 +539,10 @@ impl<'a> Method<'a> {
                 None => Some(id),
             })
             .collect();
-        self.remove_unecessary_phis(&undeclared_vars);
-        self.merge_blocks();
+        res |= self.remove_unecessary_phis(&undeclared_vars);
+        res |= self.merge_blocks();
+
+        res
     }
 
     fn merge_blocks(&mut self) -> bool {
@@ -602,7 +610,7 @@ impl<'a> Method<'a> {
 }
 
 impl<'a> InstrKind<'a> {
-    pub fn rename(&mut self, renames: &mut HashMap<Id, Id>, tmp: &mut Id) -> bool {
+    pub fn rename(&mut self, renames: &mut HashMap<IrId, IrId>, tmp: &mut IrId) -> bool {
         match self {
             Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => {}
 
@@ -754,8 +762,8 @@ impl<'a> InstrKind<'a> {
 
     fn const_fold<'b>(
         &'b mut self,
-        values: &mut HashMap<Id, Value>,
-        uses: &'b HashMap<Id, (BlockId, Vec<BlockId>)>,
+        values: &mut HashMap<IrId, Value>,
+        uses: &'b HashMap<IrId, (BlockId, Vec<BlockId>)>,
         default_string: &Rc<str>,
     ) -> Option<impl Iterator<Item = BlockId> + '_> {
         match self {
@@ -847,7 +855,7 @@ impl<'a> InstrKind<'a> {
         }
     }
 
-    fn try_replace(values: &HashMap<Id, Value>, val: &mut Value) {
+    fn try_replace(values: &HashMap<IrId, Value>, val: &mut Value) {
         if let Value::Id(id) = val {
             if let Some(new_val) = values.get(id) {
                 *val = new_val.clone();
@@ -855,7 +863,7 @@ impl<'a> InstrKind<'a> {
         }
     }
 
-    fn replace_id(values: &HashMap<Id, Value>, id: &mut Id) {
+    fn replace_id(values: &HashMap<IrId, Value>, id: &mut IrId) {
         if let Some(Value::Id(val)) = values.get(id) {
             *id = *val;
         }
@@ -863,8 +871,8 @@ impl<'a> InstrKind<'a> {
 
     fn const_fold_jmp_cond(
         &mut self,
-        values: &mut HashMap<Id, Value>,
-        id: Id,
+        values: &mut HashMap<IrId, Value>,
+        id: IrId,
         on_true: BlockId,
         on_false: BlockId,
     ) {
@@ -878,9 +886,9 @@ impl<'a> InstrKind<'a> {
     }
 
     fn const_fold_default(
-        values: &mut HashMap<Id, Value>,
+        values: &mut HashMap<IrId, Value>,
         default_string: Rc<str>,
-        id: Id,
+        id: IrId,
         ty: TypeId,
     ) -> bool {
         match ty {
@@ -900,7 +908,7 @@ impl<'a> InstrKind<'a> {
         true
     }
 
-    fn const_fold_un(values: &mut HashMap<Id, Value>, op: UnOp, id: Id, arg: Id) -> bool {
+    fn const_fold_un(values: &mut HashMap<IrId, Value>, op: UnOp, id: IrId, arg: IrId) -> bool {
         match op {
             UnOp::IsVoid if values.get(&arg) == Some(&Value::Void) => {
                 Self::insert_val(values, id, Value::Bool(true));
@@ -940,9 +948,9 @@ impl<'a> InstrKind<'a> {
     }
 
     fn const_fold_bin(
-        values: &mut HashMap<Id, Value>,
+        values: &mut HashMap<IrId, Value>,
         op: BinOp,
-        id: Id,
+        id: IrId,
         lhs: Value,
         rhs: Value,
     ) -> bool {
@@ -984,7 +992,7 @@ impl<'a> InstrKind<'a> {
         }
     }
 
-    fn insert_val(values: &mut HashMap<Id, Value>, id: Id, val: Value) -> Option<Value> {
+    fn insert_val(values: &mut HashMap<IrId, Value>, id: IrId, val: Value) -> Option<Value> {
         values.insert(id, val)
     }
 }

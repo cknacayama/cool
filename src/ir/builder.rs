@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     fmt::Debug,
     rc::Rc,
 };
@@ -7,115 +7,21 @@ use std::{
 use crate::{
     ast::*,
     index_vec::{index_vec, IndexVec, Key},
-    ir::*,
+    ir::{
+        block::{Block, BlockId},
+        IrId, Instr, InstrKind, LocalId, Value,
+    },
     span::Span,
     types::{ClassEnv, TypeId},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockId(u32);
-
-impl BlockId {
-    pub const ENTRY: BlockId = BlockId(0);
-
-    pub fn is_entry(self) -> bool {
-        self == Self::ENTRY
-    }
-}
-
-impl Key for BlockId {
-    fn to_index(self) -> usize {
-        self.0 as usize
-    }
-
-    fn from_index(index: usize) -> Self {
-        Self(index as u32)
-    }
-}
-
-impl std::fmt::Display for BlockId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block<'a> {
-    pub id:     BlockId,
-    pub scope:  u32,
-    pub instrs: VecDeque<Instr<'a>>,
-}
-
-impl<'a> Block<'a> {
-    pub fn new(id: BlockId, scope: u32) -> Self {
-        Self {
-            id,
-            scope,
-            instrs: VecDeque::new(),
-        }
-    }
-
-    pub fn can_merge(&self) -> bool {
-        !self.instrs.iter().any(|i| {
-            !matches!(
-                i.kind,
-                InstrKind::Jmp(_) | InstrKind::Label(_) | InstrKind::Nop
-            )
-        })
-    }
-
-    pub fn id(&self) -> BlockId {
-        self.id
-    }
-
-    fn push_front(&mut self, instr: Instr<'a>) {
-        self.instrs.push_front(instr)
-    }
-
-    fn push_back(&mut self, kind: InstrKind<'a>, span: Span, ty: TypeId) {
-        self.instrs.push_back(Instr::new(kind, span, ty, self.id))
-    }
-
-    pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
-        self.instrs.iter()
-    }
-
-    pub fn remove_nops(&mut self) {
-        self.instrs.retain(|i| !i.kind.is_nop());
-        self.instrs.shrink_to_fit();
-    }
-
-    pub fn set_label(&mut self) {
-        if self.id.is_entry() {
-            return;
-        }
-        let kind = InstrKind::Label(self.id);
-        let instr = Instr::new(kind, Span::default(), TypeId::SelfType, self.id);
-        self.push_front(instr)
-    }
-
-    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr<'a>> {
-        self.instrs.iter_mut()
-    }
-
-    pub fn phis_args(&mut self) -> Vec<&mut Vec<(Value, BlockId)>> {
-        let mut phis = vec![];
-        for instr in self.instrs.iter_mut() {
-            if let InstrKind::Phi(_, args) = &mut instr.kind {
-                phis.push(args);
-            }
-        }
-        phis
-    }
-}
 
 #[derive(Debug)]
 pub struct Method<'a> {
     class:       TypeId,
     id:          &'a str,
     pub blocks:  IndexVec<BlockId, Block<'a>>,
-    cur_locals:  Vec<HashMap<&'a str, Id>>,
-    locals:      IndexVec<Id, (TypeId, BlockId)>,
+    cur_locals:  Vec<HashMap<&'a str, IrId>>,
+    locals:      IndexVec<LocalId, (TypeId, BlockId)>,
     pub cur_tmp: u32,
 }
 
@@ -143,12 +49,12 @@ impl<'a> Method<'a> {
         self.blocks[block].push_front(instr)
     }
 
-    pub fn locals(&self) -> &IndexVec<Id, (TypeId, BlockId)> {
+    pub fn locals(&self) -> &IndexVec<LocalId, (TypeId, BlockId)> {
         &self.locals
     }
 
-    pub fn local_ids(&self) -> impl Iterator<Item = Id> {
-        (0..self.locals.len() as u32).map(Id::Local)
+    pub fn local_ids(&self) -> impl Iterator<Item = LocalId> {
+        (0..self.locals.len()).map(LocalId::from_index)
     }
 
     pub fn instrs_with_nops(&self) -> impl Iterator<Item = &Instr<'a>> {
@@ -183,7 +89,7 @@ impl<'a> Method<'a> {
         }
     }
 
-    fn get_local(&self, name: &'a str) -> Id {
+    fn get_local(&self, name: &'a str) -> IrId {
         self.cur_locals
             .iter()
             .rev()
@@ -192,7 +98,7 @@ impl<'a> Method<'a> {
             .unwrap()
     }
 
-    fn cur_scope_mut(&mut self) -> &mut HashMap<&'a str, Id> {
+    fn cur_scope_mut(&mut self) -> &mut HashMap<&'a str, IrId> {
         self.cur_locals.last_mut().unwrap()
     }
 
@@ -200,7 +106,7 @@ impl<'a> Method<'a> {
         self.cur_locals.push(HashMap::new())
     }
 
-    fn end_scope(&mut self) -> HashMap<&'a str, Id> {
+    fn end_scope(&mut self) -> HashMap<&'a str, IrId> {
         self.cur_locals.pop().unwrap()
     }
 
@@ -240,11 +146,11 @@ impl<'a> Method<'a> {
         }
     }
 
-    pub fn new_tmp(&mut self) -> Id {
+    pub fn new_tmp(&mut self) -> IrId {
         assert!(self.cur_tmp < u32::MAX);
         let tmp = self.cur_tmp;
         self.cur_tmp += 1;
-        Id::Tmp(tmp)
+        IrId::Tmp(tmp)
     }
 
     fn cur_block(&self) -> BlockId {
@@ -289,25 +195,25 @@ impl<'a> Method<'a> {
         }
     }
 
-    fn new_local(&mut self, name: &'a str, ty: TypeId) -> Id {
+    fn new_local(&mut self, name: &'a str, ty: TypeId) -> IrId {
         assert!(self.locals.len() < u32::MAX as usize);
-        let local = self.locals.len() as u32;
-        let id = Id::Local(local);
+        let local = self.locals.len();
+        let id = IrId::Local(LocalId::from_index(local));
         self.cur_scope_mut().insert(name, id);
         self.locals.push((ty, self.cur_block()));
         id
     }
 
-    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> Id {
+    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> IrId {
         assert!(self.locals.len() < u32::MAX as usize);
-        let local = self.locals.len() as u32;
-        let id = Id::Ptr(local);
+        let local = self.locals.len();
+        let id = IrId::Ptr(LocalId::from_index(local));
         self.cur_scope_mut().insert(name, id);
         self.locals.push((ty, self.cur_block()));
         id
     }
 
-    fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> Id {
+    fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> IrId {
         let id = self.new_local(name, ty);
         let kind = InstrKind::Local(ty, id);
         self.push_instr(kind, span, ty);
@@ -369,7 +275,7 @@ impl<'a> IrBuilder<'a> {
         self.methods.last().unwrap()
     }
 
-    fn get_local(&self, name: &'a str) -> Id {
+    fn get_local(&self, name: &'a str) -> IrId {
         self.cur_method().get_local(name)
     }
 
@@ -381,19 +287,19 @@ impl<'a> IrBuilder<'a> {
         self.cur_method_mut().begin_scope()
     }
 
-    fn end_scope(&mut self) -> HashMap<&'a str, Id> {
+    fn end_scope(&mut self) -> HashMap<&'a str, IrId> {
         self.cur_method_mut().end_scope()
     }
 
-    fn end_method(&mut self) -> HashMap<&'a str, Id> {
+    fn end_method(&mut self) -> HashMap<&'a str, IrId> {
         self.end_scope()
     }
 
-    fn new_tmp(&mut self) -> Id {
+    fn new_tmp(&mut self) -> IrId {
         self.cur_method_mut().new_tmp()
     }
 
-    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> Id {
+    fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> IrId {
         self.cur_method_mut().new_ptr(name, ty)
     }
 
@@ -414,7 +320,7 @@ impl<'a> IrBuilder<'a> {
         self.cur_method().cur_block()
     }
 
-    fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> Id {
+    fn push_local(&mut self, name: &'a str, ty: TypeId, span: Span) -> IrId {
         self.cur_method_mut().push_local(name, ty, span)
     }
 
@@ -441,7 +347,7 @@ impl<'a> IrBuilder<'a> {
         }
     }
 
-    fn build_method(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, Id> {
+    fn build_method(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, IrId> {
         let id = typed_method.id();
         let params = typed_method.params();
         let span = typed_method.span;
@@ -473,10 +379,10 @@ impl<'a> IrBuilder<'a> {
     fn build_maybe_cast(
         &mut self,
         ty: TypeId,
-        expr: Id,
+        expr: IrId,
         expr_ty: TypeId,
         span: Span,
-    ) -> Option<Id> {
+    ) -> Option<IrId> {
         match expr_ty {
             TypeId::INT | TypeId::BOOL | TypeId::STRING if ty != expr_ty => {
                 let tmp = self.new_tmp();
@@ -488,7 +394,7 @@ impl<'a> IrBuilder<'a> {
         }
     }
 
-    fn build_expr(&mut self, expr: TypedExpr<'a>) -> (Id, TypeId) {
+    fn build_expr(&mut self, expr: TypedExpr<'a>) -> (IrId, TypeId) {
         let TypedExpr { kind, span, ty } = expr;
         use TypedExprKind as TEK;
         match kind {
@@ -557,7 +463,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::SelfId => {
                 let tmp = self.new_tmp();
-                let kind = InstrKind::AssignLoad(tmp, self.cur_class, Id::LOCAL_SELF, 0);
+                let kind = InstrKind::AssignLoad(tmp, self.cur_class, IrId::LOCAL_SELF, 0);
                 self.push_instr(kind, span, ty);
                 (tmp, ty)
             }
@@ -596,7 +502,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::Block(exprs) => {
                 let exprs = exprs.into_vec().into_iter();
-                exprs.fold((Id::Tmp(0), TypeId::SelfType), |_, expr| {
+                exprs.fold((IrId::Tmp(0), TypeId::SelfType), |_, expr| {
                     self.build_expr(expr)
                 })
             }
@@ -611,7 +517,7 @@ impl<'a> IrBuilder<'a> {
         expr: TypedExpr<'a>,
         cases: Box<[TypedCaseArm<'a>]>,
         span: Span,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let _ = expr;
         let _ = cases;
         let _ = span;
@@ -623,7 +529,7 @@ impl<'a> IrBuilder<'a> {
         cond: TypedExpr<'a>,
         body: TypedExpr<'a>,
         span: Span,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let cond_block = self.begin_block(cond.span);
         let (cond, _) = self.build_expr(cond);
         let jmp_0_kind = InstrKind::JmpCond(cond, cond_block, cond_block);
@@ -649,7 +555,7 @@ impl<'a> IrBuilder<'a> {
         els: TypedExpr<'a>,
         ty: TypeId,
         span: Span,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let (cond, _) = self.build_expr(cond);
 
         let cond_block = self.cur_block();
@@ -686,7 +592,7 @@ impl<'a> IrBuilder<'a> {
         args: Box<[TypedExpr<'a>]>,
         ty: TypeId,
         span: Span,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let method_params = self
             .env
             .get_method(self.cur_class, method_name)
@@ -696,7 +602,7 @@ impl<'a> IrBuilder<'a> {
         let mut args = self.build_args(args, method_params);
 
         let tmp1 = self.new_tmp();
-        let kind = InstrKind::AssignLoad(tmp1, self.cur_class, Id::LOCAL_SELF, 0);
+        let kind = InstrKind::AssignLoad(tmp1, self.cur_class, IrId::LOCAL_SELF, 0);
         self.push_instr(kind, span, self.cur_class);
         args[0] = (self.cur_class, Value::Id(tmp1));
 
@@ -747,7 +653,7 @@ impl<'a> IrBuilder<'a> {
         args: Box<[TypedExpr<'a>]>,
         ty: TypeId,
         span: Span,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let expr_ty = expr.ty;
 
         let method_params = self
@@ -792,7 +698,7 @@ impl<'a> IrBuilder<'a> {
         args: Box<[TypedExpr<'a>]>,
         span: Span,
         result_ty: TypeId,
-    ) -> (Id, TypeId) {
+    ) -> (IrId, TypeId) {
         let method_params = self
             .env
             .get_method(ty, method_name)

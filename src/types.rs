@@ -306,7 +306,9 @@ impl index_vec::Key for TypeId {
     }
 
     fn from_index(index: usize) -> Self {
-        TypeId::Class(ClassId(NonZeroU32::new((index + 1) as u32).unwrap()))
+        TypeId::Class(ClassId(unsafe {
+            NonZeroU32::new((index + 1) as u32).unwrap_unchecked()
+        }))
     }
 }
 
