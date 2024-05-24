@@ -1,16 +1,17 @@
-pub mod block;
-pub mod builder;
-pub mod opt;
-
-use std::rc::Rc;
+use std::{fmt, rc::Rc};
 
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::Key,
-    ir::block::BlockId,
     span::Span,
     types::TypeId,
 };
+
+use block::BlockId;
+
+pub mod block;
+pub mod builder;
+pub mod opt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -21,7 +22,7 @@ pub enum Value {
     Str(Rc<str>),
 }
 
-impl std::fmt::Display for Value {
+impl fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Void => write!(f, "void"),
@@ -34,46 +35,63 @@ impl std::fmt::Display for Value {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstrKind<'a> {
+pub enum InstrKind {
     Nop,
 
-    Method(TypeId, &'a str, TypeId, usize),
-    Param(TypeId, IrId),
+    Vtable(GlobalId, Box<[GlobalId]>),
+    Method {
+        id:    IrId,
+        ret:   usize,
+        arity: usize,
+    },
+    Param(usize, IrId),
     Return(Value),
     Label(BlockId),
+
     Jmp(BlockId),
-    /// (src, on_true, on_false)
-    JmpCond(IrId, BlockId, BlockId),
+    JmpCond {
+        src:      IrId,
+        on_true:  BlockId,
+        on_false: BlockId,
+    },
+
     Assign(IrId, Value),
-    AssignDefault(IrId, TypeId),
-    AssignBin(BinOp, IrId, Value, Value),
-    AssignUn(UnOp, IrId, IrId),
+    AssignBin {
+        dst: IrId,
+        op:  BinOp,
+        lhs: Value,
+        rhs: Value,
+    },
+    AssignUn {
+        dst: IrId,
+        op:  UnOp,
+        src: IrId,
+    },
     AssignToObj(IrId, TypeId, Value),
-    AssignCall(IrId, IrId, Box<[(TypeId, Value)]>),
-    AssignStaticCall(IrId, TypeId, &'a str, Box<[(TypeId, Value)]>),
+    AssignCall(IrId, IrId, Box<[(usize, Value)]>),
     AssignExtract(IrId, IrId, usize),
     Phi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
-    Local(TypeId, IrId),
-    AssignLoad(IrId, TypeId, IrId, usize),
-    Store(IrId, TypeId, Value),
-    Attr(TypeId, IrId),
+    Local(usize, IrId),
+
+    AssignLoad {
+        dst:    IrId,
+        size:   usize,
+        src:    IrId,
+        offset: usize,
+    },
+    Store(IrId, usize, Value),
+    Attr(usize, IrId),
 }
 
-impl<'a> InstrKind<'a> {
+impl InstrKind {
     pub fn is_block_end(&self) -> bool {
-        matches!(
-            self,
-            Self::Return(_) | Self::Jmp(_) | Self::JmpCond(_, _, _)
-        )
+        matches!(self, Self::Return(_) | Self::Jmp(_) | Self::JmpCond { .. })
     }
 
-    pub fn is_call(&self) -> bool {
-        matches!(
-            self,
-            Self::AssignCall(_, _, _) | Self::AssignStaticCall(_, _, _, _)
-        )
+    pub fn is_method(&self) -> bool {
+        matches!(self, Self::AssignCall(_, _, _) | Self::Method { .. })
     }
 
     pub fn is_nop(&self) -> bool {
@@ -82,14 +100,19 @@ impl<'a> InstrKind<'a> {
 
     pub fn uses(&self) -> (Option<IrId>, Option<Box<[IrId]>>) {
         match self {
-            Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => (None, None),
+            Self::Nop | Self::Label(_) | Self::Jmp(_) => (None, None),
 
-            Self::Param(_, id)
-            | Self::AssignDefault(id, _)
+            Self::Method { id, .. }
+            | Self::Param(_, id)
             | Self::Local(_, id)
             | Self::Attr(_, id) => (Some(*id), None),
 
-            Self::JmpCond(id, _, _) => (None, Some([*id].into())),
+            Self::Vtable(dst, ids) => (
+                Some(IrId::Global(*dst)),
+                Some(ids.iter().copied().map(IrId::Global).collect()),
+            ),
+
+            Self::JmpCond { src, .. } => (None, Some([*src].into())),
             Self::Return(val) => {
                 if let Value::Id(id) = val {
                     (None, Some([*id].into()))
@@ -106,52 +129,49 @@ impl<'a> InstrKind<'a> {
                 }
             }
 
-            Self::AssignBin(_, id, Value::Id(lhs), Value::Id(rhs)) => {
-                (Some(*id), Some([*lhs, *rhs].into()))
+            Self::AssignBin {
+                dst,
+                lhs: Value::Id(lhs),
+                rhs: Value::Id(rhs),
+                ..
+            } => (Some(*dst), Some([*lhs, *rhs].into())),
+
+            Self::AssignBin {
+                dst,
+                lhs: Value::Id(src),
+                ..
+            }
+            | Self::AssignBin {
+                dst,
+                rhs: Value::Id(src),
+                ..
+            }
+            | Self::AssignUn { dst, src, .. }
+            | Self::Assign(dst, Value::Id(src))
+            | Self::AssignToObj(dst, _, Value::Id(src))
+            | Self::AssignLoad { dst, src, .. }
+            | Self::AssignExtract(dst, src, _) => (Some(*dst), Some([*src].into())),
+
+            Self::Assign(dst, _) | Self::AssignToObj(dst, _, _) | Self::AssignBin { dst, .. } => {
+                (Some(*dst), None)
             }
 
-            Self::AssignBin(_, id1, _, Value::Id(id2))
-            | Self::AssignBin(_, id1, Value::Id(id2), _)
-            | Self::Assign(id1, Value::Id(id2))
-            | Self::AssignUn(_, id1, id2)
-            | Self::AssignToObj(id1, _, Value::Id(id2))
-            | Self::AssignLoad(id1, _, id2, _)
-            | Self::AssignExtract(id1, id2, _) => (Some(*id1), Some([*id2].into())),
-
-            Self::Assign(id1, _) | Self::AssignToObj(id1, _, _) | Self::AssignBin(_, id1, _, _) => {
-                (Some(*id1), None)
-            }
-
-            Self::AssignCall(id1, id2, args) => {
+            Self::AssignCall(dst, id2, args) => {
                 let used_ids = args
                     .iter()
                     .filter_map(|(_, val)| match val {
-                        Value::Id(id) => Some(*id),
+                        Value::Id(id) => Some(id),
                         _ => None,
                     })
                     .fold(vec![*id2], |mut vars, id| {
-                        vars.push(id);
+                        vars.push(*id);
                         vars
                     });
-                (Some(*id1), Some(used_ids.into_boxed_slice()))
+                (Some(*dst), Some(used_ids.into_boxed_slice()))
             }
 
-            Self::AssignStaticCall(id1, _, _, args) => {
-                let used_ids = args
-                    .iter()
-                    .filter_map(|(_, val)| match val {
-                        Value::Id(id) => Some(*id),
-                        _ => None,
-                    })
-                    .fold(vec![], |mut vars, id| {
-                        vars.push(id);
-                        vars
-                    });
-                (Some(*id1), Some(used_ids.into_boxed_slice()))
-            }
-
-            Self::Phi(id, vals) => (
-                Some(*id),
+            Self::Phi(dst, vals) => (
+                Some(*dst),
                 Some(
                     vals.iter()
                         .filter_map(|(val, _)| {
@@ -168,40 +188,43 @@ impl<'a> InstrKind<'a> {
     }
 }
 
-impl<'a> std::fmt::Display for InstrKind<'a> {
+impl fmt::Display for InstrKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InstrKind::Nop => write!(f, "    nop"),
-            InstrKind::Method(ty, name, ret_ty, arity) => {
-                write!(f, "method {} {}.{} {} {{", ret_ty, ty, name, arity)
+            InstrKind::Vtable(dst, ids) => {
+                write!(f, "{} = [", dst)?;
+                for (i, id) in ids.iter().enumerate() {
+                    write!(f, "{}", id)?;
+                    if i != ids.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]")
+            }
+            InstrKind::Method { id, ret, arity } => {
+                write!(f, "method {} {}, {} {{", ret, id, arity)
             }
             InstrKind::Param(ty, id) => write!(f, "    param {} {}", ty, id),
             InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),
             InstrKind::Label(subs) => write!(f, "block{}:", subs),
             InstrKind::Jmp(subs) => write!(f, "    jmp block{}", subs),
-            InstrKind::JmpCond(id, on_true, on_false) => {
-                write!(f, "    {} ? block{} : block{}", id, on_true, on_false)
+            InstrKind::JmpCond {
+                src,
+                on_true,
+                on_false,
+            } => {
+                write!(f, "    {} ? block{} : block{}", src, on_true, on_false)
             }
             InstrKind::Assign(id, val) => write!(f, "    {} = {}", id, val),
-            InstrKind::AssignDefault(id, ty) => write!(f, "    {} = default {}", id, ty),
-            InstrKind::AssignBin(op, id, lhs, rhs) => {
-                write!(f, "    {} = {} {}, {}", id, op.to_ir_string(), lhs, rhs)
+            InstrKind::AssignBin { op, dst, lhs, rhs } => {
+                write!(f, "    {} = {} {}, {}", dst, op.to_ir_string(), lhs, rhs)
             }
-            InstrKind::AssignUn(op, id, val) => {
-                write!(f, "    {} = {} {}", id, op.to_ir_string(), val)
+            InstrKind::AssignUn { op, dst, src } => {
+                write!(f, "    {} = {} {}", dst, op.to_ir_string(), src)
             }
             InstrKind::AssignCall(id, func, args) => {
                 write!(f, "    {} = call {}(", id, func)?;
-                for (i, arg) in args.iter().enumerate() {
-                    write!(f, "{} {}", arg.0, arg.1)?;
-                    if i != args.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, ")")
-            }
-            InstrKind::AssignStaticCall(id, ty, name, args) => {
-                write!(f, "    {} = dispatch {}_{}(", id, ty, name)?;
                 for (i, arg) in args.iter().enumerate() {
                     write!(f, "{} {}", arg.0, arg.1)?;
                     if i != args.len() - 1 {
@@ -227,8 +250,13 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
                 Ok(())
             }
             InstrKind::Local(ty, name) => write!(f, "    local {} {}", ty, name),
-            InstrKind::AssignLoad(id, ty, name, offset) => {
-                write!(f, "    {} = load {} {}, {}", id, ty, name, offset)
+            InstrKind::AssignLoad {
+                dst,
+                size,
+                src,
+                offset,
+            } => {
+                write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
             }
             InstrKind::Store(name, ty, id) => write!(f, "    store {}, {} {}", name, ty, id),
             InstrKind::Attr(ty, name) => write!(f, "    attr {} {}", ty, name),
@@ -237,15 +265,15 @@ impl<'a> std::fmt::Display for InstrKind<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Instr<'a> {
-    pub kind:  InstrKind<'a>,
+pub struct Instr {
+    pub kind:  InstrKind,
     pub span:  Span,
     pub ty:    TypeId,
     pub block: BlockId,
 }
 
-impl<'a> Instr<'a> {
-    pub fn new(kind: InstrKind<'a>, span: Span, ty: TypeId, block: BlockId) -> Self {
+impl Instr {
+    pub fn new(kind: InstrKind, span: Span, ty: TypeId, block: BlockId) -> Self {
         Self {
             kind,
             span,
@@ -254,8 +282,12 @@ impl<'a> Instr<'a> {
         }
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalId(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlobalId(u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrId {
@@ -263,6 +295,7 @@ pub enum IrId {
     Renamed(u32),
     Local(LocalId),
     Ptr(LocalId),
+    Global(GlobalId),
 }
 
 impl IrId {
@@ -291,11 +324,16 @@ impl IrId {
         matches!(self, Self::Renamed(_))
     }
 
+    pub fn is_global(self) -> bool {
+        matches!(self, Self::Global(_))
+    }
+
     pub fn get_subs(self) -> u32 {
         match self {
             Self::Tmp(subs)
             | Self::Local(LocalId(subs))
             | Self::Ptr(LocalId(subs))
+            | Self::Global(GlobalId(subs))
             | Self::Renamed(subs) => subs,
         }
     }
@@ -305,6 +343,7 @@ impl IrId {
             Self::Tmp(index) => Self::Tmp(index + 1),
             Self::Local(LocalId(index)) => Self::Local(LocalId(index + 1)),
             Self::Ptr(LocalId(index)) => Self::Ptr(LocalId(index + 1)),
+            Self::Global(GlobalId(index)) => Self::Global(GlobalId(index + 1)),
             Self::Renamed(index) => Self::Renamed(index + 1),
         }
     }
@@ -315,18 +354,41 @@ impl IrId {
     }
 }
 
-impl std::fmt::Display for IrId {
+impl fmt::Display for IrId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tmp(subs) => write!(f, "%{}", subs),
-            Self::Local(LocalId(subs)) => write!(f, "%l{}", subs),
-            Self::Ptr(LocalId(subs)) => write!(f, "%p{}", subs),
+            Self::Local(LocalId(subs)) => write!(f, "%local_{}", subs),
+            Self::Ptr(LocalId(subs)) => write!(f, "%ptr_{}", subs),
+            Self::Global(GlobalId(subs)) => write!(f, "@globl_{}", subs),
             Self::Renamed(subs) => write!(f, "%{}", subs),
         }
     }
 }
 
+impl fmt::Display for LocalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "%local_{}", self.0)
+    }
+}
+
+impl fmt::Display for GlobalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "@globl_{}", self.0)
+    }
+}
+
 impl Key for LocalId {
+    fn to_index(self) -> usize {
+        self.0 as usize
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+}
+
+impl Key for GlobalId {
     fn to_index(self) -> usize {
         self.0 as usize
     }

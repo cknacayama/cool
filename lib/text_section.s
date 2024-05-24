@@ -10,7 +10,7 @@ _start:
 
     # (new Main).main()
     push    0
-    call    Main.New
+    call    Main.new
     add     rsp, 8
     push    rdx
     push    rax
@@ -24,17 +24,17 @@ _start:
     mov     rdi, 0
     syscall
 
-    .globl Object.New
-Object.New:
+    .globl Object.new
+Object.new:
     cmp     QWORD PTR [rsp + 8], 0
-    jne     .Object.New_L1
+    jne     .Object.new_L1
     push    0
     call    allocator.alloc
     add     rsp, 8
-    jmp     .Object.New_L2
-.Object.New_L1:
+    jmp     .Object.new_L2
+.Object.new_L1:
     mov     rax, QWORD PTR [rsp + 8]
-.Object.New_L2:
+.Object.new_L2:
     lea     rdx, QWORD PTR [rip + Object.Table]
     ret
 
@@ -56,8 +56,8 @@ Object.copy:
     mov     rdx, QWORD PTR [rsp + 16]
     ret
 
-    .globl String.New
-String.New:
+    .globl String.new
+String.new:
     mov     rax, 0
     lea     rdx, QWORD PTR [rip + empty_string]
     ret
@@ -133,8 +133,8 @@ String.To_Object:
 
     ret
 
-    .globl Int.New
-Int.New:
+    .globl Int.new
+Int.new:
     mov     rax, 0
     ret
 
@@ -161,8 +161,8 @@ Int.To_Object:
 
     ret
 
-    .globl Bool.New
-Bool.New:
+    .globl Bool.new
+Bool.new:
     mov     rax, 0
     ret
 
@@ -189,17 +189,17 @@ Bool.To_Object:
 
     ret
 
-    .globl IO.New
-IO.New:
+    .globl IO.new
+IO.new:
     cmp     QWORD PTR [rsp + 8], 0
-    jne     .IO.New_L1
+    jne     .IO.new_L1
     push    0
     call    allocator.alloc
     add     rsp, 8
-    jmp     .IO.New_L2
-.IO.New_L1:
+    jmp     .IO.new_L2
+.IO.new_L1:
     mov     rax, QWORD PTR [rsp + 8]
-.IO.New_L2:
+.IO.new_L2:
     lea     rdx, QWORD PTR [rip + IO.Table]
 
     ret
@@ -245,7 +245,7 @@ IO.out_int:
     .globl IO.in_string
 IO.in_string:
     push    0
-    call    String.New
+    call    String.new
     add     rsp, 8
     ret
 

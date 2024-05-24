@@ -2,7 +2,7 @@ use std::{io, path::PathBuf};
 
 use crate::{
     checker::{MultiPassChecker, SemanticError, TypeChecker},
-    ir::{builder::IrBuilder, opt},
+    ir::builder::IrBuilder,
     lexer::Lexer,
     parser::Parser,
 };
@@ -172,7 +172,7 @@ impl Config {
                     method.set_labels();
                 }
                 let mut output = String::new();
-                for ir in ir_builder.instrs().map(|instr| &instr.kind) {
+                for ir in ir_builder.instrs() {
                     output.push_str(&format!("{}\n", ir));
                 }
                 Ok(output)
@@ -184,12 +184,11 @@ impl Config {
                 for typed in typed {
                     ir_builder.build_class(typed);
                 }
-                let default_string = ir_builder.strings().get("").unwrap().clone();
                 for method in ir_builder.methods_mut() {
-                    opt::optimize(method, &default_string);
+                    method.optimize();
                 }
                 let mut output = String::new();
-                for ir in ir_builder.instrs().map(|instr| &instr.kind) {
+                for ir in ir_builder.instrs() {
                     output.push_str(&format!("{}\n", ir));
                 }
                 Ok(output)

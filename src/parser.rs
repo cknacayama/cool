@@ -1,4 +1,4 @@
-use std::iter::Peekable;
+use std::{borrow::Cow, iter::Peekable};
 
 use crate::{
     ast::{BinOp, CaseArm, Class, Expr, ExprKind, Feature, FeatureKind, Formal, UnOp},
@@ -245,7 +245,7 @@ impl<'a> Parser<'a> {
             Type::Object
         };
         self.expect(TokenKind::LBrace)?;
-        let mut features = vec![];
+        let mut features = self.default_methods(id, span);
         while !self.peek_if(TokenKind::RBrace) {
             features.push(self.parse_feature()?);
             self.expect(TokenKind::Semicolon)?;
@@ -254,6 +254,30 @@ impl<'a> Parser<'a> {
         let span = span.merge(&self.expect(TokenKind::Semicolon)?);
 
         Ok(Class::new(id, parent, features.into_boxed_slice(), span))
+    }
+
+    fn default_methods(&mut self, id: &'a str, span: Span) -> Vec<Feature<'a>> {
+        let type_name = Feature::new(
+            FeatureKind::Method {
+                id:        "type_name",
+                params:    Box::new([]),
+                return_ty: Type::String,
+                body:      Expr::new(ExprKind::StringLit(Cow::Borrowed(id)), span),
+            },
+            span,
+        );
+
+        let new = Feature::new(
+            FeatureKind::Method {
+                id:        "new",
+                params:    Box::new([]),
+                return_ty: Type::Class(id),
+                body:      Expr::new(ExprKind::New(Type::Class(id)), span),
+            },
+            span,
+        );
+
+        vec![type_name, new]
     }
 
     fn parse_feature(&mut self) -> ParseResult<Feature<'a>> {

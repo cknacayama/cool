@@ -1,33 +1,16 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    rc::Rc,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::{index_vec, IndexVec, Key},
-    ir::{
-        block::{Block, BlockId},
-        builder::Method,
-        Instr, InstrKind, IrId, LocalId, Value,
-    },
     types::TypeId,
 };
 
-pub fn optimize(method: &mut Method<'_>, default_string: &Rc<str>) {
-    let preds = method.predecessors();
-    let idoms = method.idoms(&preds);
-    let dom_tree = method.dom_tree(&idoms);
-
-    let dom_frontiers = method.dom_frontiers(&preds, &idoms);
-    let phis = method.phi_positions(&preds, &dom_frontiers);
-
-    method.mem2reg(&preds, &dom_tree, phis);
-
-    while method.const_propagation(default_string) | method.dead_code_elimination() {}
-
-    method.set_labels();
-}
+use super::{
+    block::{Block, BlockId},
+    builder::MethodBuilder,
+    Instr, InstrKind, IrId, LocalId, Value,
+};
 
 type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
 type ImmediateDominators = IndexVec<BlockId, BlockId>;
@@ -35,7 +18,22 @@ type DominatorTree = IndexVec<BlockId, Vec<BlockId>>;
 type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
 type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
 
-impl<'a> Method<'a> {
+impl<'a> MethodBuilder<'a> {
+    pub fn optimize(&mut self) {
+        let preds = self.predecessors();
+        let idoms = self.idoms(&preds);
+        let dom_tree = self.dom_tree(&idoms);
+
+        let dom_frontiers = self.dom_frontiers(&preds, &idoms);
+        let phis = self.phi_positions(&preds, &dom_frontiers);
+
+        self.mem2reg(&preds, &dom_tree, phis);
+
+        while self.const_propagation() | self.dead_code_elimination() {}
+
+        self.set_labels();
+    }
+
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
         let block = &self.blocks[block];
 
@@ -43,7 +41,9 @@ impl<'a> Method<'a> {
             InstrKind::Jmp(target) => {
                 f(target);
             }
-            InstrKind::JmpCond(_, on_true, on_false) => {
+            InstrKind::JmpCond {
+                on_true, on_false, ..
+            } => {
                 f(on_true);
                 f(on_false);
             }
@@ -52,14 +52,16 @@ impl<'a> Method<'a> {
         }
     }
 
-    fn successors_inner_visit<F: FnMut(&mut Block<'a>)>(&mut self, block: BlockId, mut f: F) {
+    fn successors_inner_visit<F: FnMut(&mut Block)>(&mut self, block: BlockId, mut f: F) {
         let block = &self.blocks[block];
 
         match block.instrs.back().unwrap().kind {
             InstrKind::Jmp(target) => {
                 f(self.blocks.get_mut(target).unwrap());
             }
-            InstrKind::JmpCond(_, on_true, on_false) => {
+            InstrKind::JmpCond {
+                on_true, on_false, ..
+            } => {
                 f(self.blocks.get_mut(on_true).unwrap());
                 f(self.blocks.get_mut(on_false).unwrap());
             }
@@ -105,7 +107,7 @@ impl<'a> Method<'a> {
 
         if removed {
             for (id, block) in self.blocks.iter_mut() {
-                new_blocks[block.id()] = Some(id);
+                new_blocks[block.id] = Some(id);
                 block.id = id;
             }
 
@@ -129,10 +131,8 @@ impl<'a> Method<'a> {
                 if vals.is_empty() {
                     instr.kind.replace_with_nop();
                 } else if vals.len() == 1 {
-                    instr.kind = match &vals[0].0 {
-                        Value::Void => InstrKind::AssignDefault(*id, TypeId::OBJECT),
-                        val => InstrKind::Assign(*id, val.clone()),
-                    };
+                    let val = vals[0].0.clone();
+                    instr.kind = InstrKind::Assign(*id, val);
                 }
             }
         }
@@ -147,7 +147,11 @@ impl<'a> Method<'a> {
                         *target = new_target
                     }
                 }
-                InstrKind::JmpCond(_, ref mut on_true, ref mut on_false) => {
+                InstrKind::JmpCond {
+                    ref mut on_true,
+                    ref mut on_false,
+                    ..
+                } => {
                     if let Some(new_target) = new_blocks[*on_true] {
                         *on_true = new_target
                     }
@@ -174,7 +178,7 @@ impl<'a> Method<'a> {
         let mut visited = index_vec![false; self.blocks.len()];
 
         fn post_order_visit(
-            fun: &Method<'_>,
+            fun: &MethodBuilder<'_>,
             bb: BlockId,
             post_order: &mut Vec<BlockId>,
             visited: &mut IndexVec<BlockId, bool>,
@@ -296,10 +300,10 @@ impl<'a> Method<'a> {
         frontiers
     }
 
-    fn all_stores(&self) -> IndexVec<LocalId, (&Block<'a>, Vec<BlockId>)> {
+    fn all_stores(&self) -> IndexVec<LocalId, (&Block, Vec<BlockId>)> {
         let mut stores = IndexVec::with_capacity(self.locals().len());
 
-        for local_block in self.locals().iter().map(|(_, (_, block))| *block) {
+        for local_block in self.locals().inner().iter().map(|(_, block)| *block) {
             stores.push((self.blocks.get(local_block).unwrap(), vec![]));
         }
 
@@ -422,7 +426,7 @@ impl<'a> Method<'a> {
 
     fn rename_ids(&mut self, preds: &Predecessors, dom_tree: &DominatorTree) {
         fn rename(
-            method: &mut Method<'_>,
+            method: &mut MethodBuilder<'_>,
             block: BlockId,
             renames: &mut HashMap<IrId, IrId>,
             cur_tmp: &mut IrId,
@@ -436,7 +440,7 @@ impl<'a> Method<'a> {
             }
 
             method.successors_inner_visit(block, |s| {
-                let j = preds[s.id()].iter().position(|&p| p == block).unwrap();
+                let j = preds[s.id].iter().position(|&p| p == block).unwrap();
                 for args in s.phis_args() {
                     if let Value::Id(id) = args[j].0 {
                         args[j].0 = Value::Id(renames[&id]);
@@ -514,7 +518,7 @@ impl<'a> Method<'a> {
         }
 
         while let Some(id) = counter.iter().find_map(|(id, (use_count, _, i, _))| {
-            if *use_count == 0 && !i.as_ref().unwrap().is_call() {
+            if *use_count == 0 && !i.as_ref().unwrap().is_method() {
                 Some(*id)
             } else {
                 None
@@ -568,13 +572,13 @@ impl<'a> Method<'a> {
 
         let len = self.blocks.len();
 
-        self.blocks.retain(|block| new_blocks[block.id()].is_none());
+        self.blocks.retain(|block| new_blocks[block.id].is_none());
 
         let removed = len != self.blocks.len();
 
         if removed {
             for (id, block) in self.blocks.iter_mut() {
-                let block_id = block.id();
+                let block_id = block.id;
                 for (_, new_name) in new_blocks.iter_mut().filter(|(_, v)| **v == Some(block_id)) {
                     *new_name = Some(id);
                 }
@@ -590,7 +594,7 @@ impl<'a> Method<'a> {
         removed
     }
 
-    fn const_propagation(&mut self, default_string: &Rc<str>) -> bool {
+    fn const_propagation(&mut self) -> bool {
         let mut values = HashMap::new();
         let mut work_list = self.block_ids().collect::<VecDeque<_>>();
         let mut changed = false;
@@ -598,7 +602,7 @@ impl<'a> Method<'a> {
 
         while let Some(block) = work_list.pop_front() {
             for instr in self.blocks[block].instrs_mut().map(|instr| &mut instr.kind) {
-                if let Some(used) = instr.const_fold(&mut values, &uses, default_string) {
+                if let Some(used) = instr.const_fold(&mut values, &uses) {
                     changed = true;
                     work_list.extend(used);
                 }
@@ -609,17 +613,21 @@ impl<'a> Method<'a> {
     }
 }
 
-impl<'a> InstrKind<'a> {
+impl InstrKind {
     pub fn rename(&mut self, renames: &mut HashMap<IrId, IrId>, tmp: &mut IrId) -> bool {
         match self {
-            Self::Nop | Self::Method(_, _, _, _) | Self::Label(_) | Self::Jmp(_) => {}
+            Self::Nop
+            | Self::Method { .. }
+            | Self::Vtable(_, _)
+            | Self::Label(_)
+            | Self::Jmp(_) => {}
 
             Self::Local(_, _) => {
                 *self = Self::Nop;
                 return true;
             }
 
-            Self::JmpCond(id, _, _) => {
+            Self::JmpCond { src: id, .. } => {
                 let cur_id = renames.get(id).unwrap();
                 *id = *cur_id;
             }
@@ -653,59 +661,61 @@ impl<'a> InstrKind<'a> {
                 }
             },
 
-            Self::AssignLoad(id1, _, id2, _) if id2.is_ptr() => {
-                let cur_id2 = renames.get(id2).unwrap();
-                *id2 = *cur_id2;
+            Self::AssignLoad { dst, src, .. } if src.is_ptr() => {
+                let cur_id2 = renames.get(src).unwrap();
+                *src = *cur_id2;
                 let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
-                *id1 = new_id;
+                renames.insert(*dst, new_id);
+                *dst = new_id;
             }
 
-            Self::AssignLoad(id1, _, id2, _) => {
-                let cur_id2 = *renames.get(id2).unwrap();
+            Self::AssignLoad { dst, src, .. } => {
+                let cur_id2 = *renames.get(src).unwrap();
                 let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
+                renames.insert(*dst, new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
             }
 
-            Self::AssignBin(_, id, Value::Id(lhs), Value::Id(rhs)) => {
+            Self::AssignBin {
+                dst,
+                lhs: Value::Id(lhs),
+                rhs: Value::Id(rhs),
+                ..
+            } => {
                 let cur_lhs = renames.get(lhs).unwrap();
                 *lhs = *cur_lhs;
                 let cur_rhs = renames.get(rhs).unwrap();
                 *rhs = *cur_rhs;
                 let new_id = tmp.next_mut();
-                renames.insert(*id, new_id);
-                *id = new_id;
+                renames.insert(*dst, new_id);
+                *dst = new_id;
             }
 
-            Self::Assign(id1, Value::Id(id2))
-            | Self::AssignUn(_, id1, id2)
-            | Self::AssignToObj(id1, _, Value::Id(id2))
-            | Self::AssignBin(_, id1, Value::Id(id2), _)
-            | Self::AssignBin(_, id1, _, Value::Id(id2)) => {
-                let cur_id = renames.get(id2).unwrap();
-                *id2 = *cur_id;
+            Self::Assign(dst, Value::Id(src))
+            | Self::AssignUn { dst, src, .. }
+            | Self::AssignToObj(dst, _, Value::Id(src))
+            | Self::AssignBin {
+                dst,
+                lhs: Value::Id(src),
+                ..
+            }
+            | Self::AssignBin {
+                dst,
+                rhs: Value::Id(src),
+                ..
+            } => {
+                let cur_id = renames.get(src).unwrap();
+                *src = *cur_id;
                 let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
-                *id1 = new_id;
+                renames.insert(*dst, new_id);
+                *dst = new_id;
             }
 
             Self::AssignCall(id1, id2, args) => {
-                let cur_id2 = renames.get(id2).unwrap();
-                *id2 = *cur_id2;
-                for id in args.iter_mut().filter_map(|(_, val)| match val {
-                    Value::Id(id) => Some(id),
-                    _ => None,
-                }) {
-                    let cur_id = renames.get(id).unwrap();
-                    *id = *cur_id;
+                if !id2.is_global() {
+                    let cur_id2 = renames.get(id2).unwrap();
+                    *id2 = *cur_id2;
                 }
-                let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
-                *id1 = new_id;
-            }
-
-            Self::AssignStaticCall(id1, _, _, args) => {
                 for id in args.iter_mut().filter_map(|(_, val)| match val {
                     Value::Id(id) => Some(id),
                     _ => None,
@@ -726,15 +736,14 @@ impl<'a> InstrKind<'a> {
                 *id1 = new_id;
             }
 
-            Self::Param(_, id)
-            | Self::AssignDefault(id, _)
-            | Self::Assign(id, _)
-            | Self::Attr(_, id)
-            | Self::AssignBin(_, id, _, _)
-            | Self::AssignToObj(id, _, _) => {
+            Self::Param(_, dst)
+            | Self::Assign(dst, _)
+            | Self::Attr(_, dst)
+            | Self::AssignBin { dst, .. }
+            | Self::AssignToObj(dst, _, _) => {
                 let new_id = tmp.next_mut();
-                renames.insert(*id, new_id);
-                *id = new_id;
+                renames.insert(*dst, new_id);
+                *dst = new_id;
             }
 
             Self::Phi(id, vals) => {
@@ -764,7 +773,6 @@ impl<'a> InstrKind<'a> {
         &'b mut self,
         values: &mut HashMap<IrId, Value>,
         uses: &'b HashMap<IrId, (BlockId, Vec<BlockId>)>,
-        default_string: &Rc<str>,
     ) -> Option<impl Iterator<Item = BlockId> + '_> {
         match self {
             InstrKind::Assign(id, val) => {
@@ -773,53 +781,48 @@ impl<'a> InstrKind<'a> {
                 self.replace_with_nop();
                 Some(uses)
             }
-            InstrKind::AssignUn(op, id, arg) => {
+            InstrKind::AssignUn { op, dst, src } => {
                 let op = *op;
-                let id = *id;
-                Self::replace_id(values, arg);
-                let arg = *arg;
-                if Self::const_fold_un(values, op, id, arg) {
-                    let uses = uses[&id].1.iter().copied();
+                let dst = *dst;
+                Self::replace_id(values, src);
+                let src = *src;
+                if Self::const_fold_un(values, op, dst, src) {
+                    let uses = uses[&dst].1.iter().copied();
                     self.replace_with_nop();
                     Some(uses)
                 } else {
                     None
                 }
             }
-            InstrKind::AssignBin(op, id, lhs, rhs) => {
+            InstrKind::AssignBin { op, dst, lhs, rhs } => {
                 let op = *op;
-                let id = *id;
+                let dst = *dst;
                 Self::try_replace(values, lhs);
                 Self::try_replace(values, rhs);
                 let lhs = lhs.clone();
                 let rhs = rhs.clone();
-                if Self::const_fold_bin(values, op, id, lhs, rhs) {
-                    let uses = uses[&id].1.iter().copied();
+                if Self::const_fold_bin(values, op, dst, lhs, rhs) {
+                    let uses = uses[&dst].1.iter().copied();
                     self.replace_with_nop();
                     Some(uses)
                 } else {
                     None
                 }
             }
-            InstrKind::AssignDefault(id, ty) => {
-                let id = *id;
-                let ty = *ty;
-                if Self::const_fold_default(values, default_string.clone(), id, ty) {
-                    let uses = uses[&id].1.iter().copied();
-                    self.replace_with_nop();
-                    Some(uses)
-                } else {
-                    None
-                }
-            }
-            InstrKind::JmpCond(id, on_true, on_false) => {
-                Self::replace_id(values, id);
-                let id = *id;
+
+            InstrKind::JmpCond {
+                src,
+                on_true,
+                on_false,
+            } => {
+                Self::replace_id(values, src);
+                let id = *src;
                 let on_true = *on_true;
                 let on_false = *on_false;
                 self.const_fold_jmp_cond(values, id, on_true, on_false);
                 None
             }
+
             InstrKind::AssignCall(_, id, args) => {
                 for arg in args.iter_mut().map(|(_, id)| id) {
                     Self::try_replace(values, arg);
@@ -827,12 +830,7 @@ impl<'a> InstrKind<'a> {
                 Self::replace_id(values, id);
                 None
             }
-            InstrKind::AssignStaticCall(_, _, _, args) => {
-                for arg in args.iter_mut().map(|(_, id)| id) {
-                    Self::try_replace(values, arg);
-                }
-                None
-            }
+
             InstrKind::AssignExtract(_, id, _) => {
                 Self::replace_id(values, id);
                 None
@@ -883,29 +881,6 @@ impl<'a> InstrKind<'a> {
                 *self = InstrKind::Jmp(on_false);
             }
         }
-    }
-
-    fn const_fold_default(
-        values: &mut HashMap<IrId, Value>,
-        default_string: Rc<str>,
-        id: IrId,
-        ty: TypeId,
-    ) -> bool {
-        match ty {
-            TypeId::INT => {
-                Self::insert_val(values, id, Value::Int(0));
-            }
-            TypeId::BOOL => {
-                Self::insert_val(values, id, Value::Bool(false));
-            }
-            TypeId::STRING => {
-                Self::insert_val(values, id, Value::Str(default_string.clone()));
-            }
-            _ => {
-                Self::insert_val(values, id, Value::Void);
-            }
-        }
-        true
     }
 
     fn const_fold_un(values: &mut HashMap<IrId, Value>, op: UnOp, id: IrId, arg: IrId) -> bool {

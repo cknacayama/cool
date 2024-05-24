@@ -1,4 +1,4 @@
-use core::marker::PhantomData;
+use std::marker::PhantomData;
 
 pub trait Key: Copy {
     fn to_index(self) -> usize;
@@ -212,7 +212,7 @@ pub(crate) use index_vec;
 
 #[derive(Debug, Clone)]
 pub struct Iter<'a, K: Key, V> {
-    values:  core::slice::Iter<'a, V>,
+    values:  std::slice::Iter<'a, V>,
     current: K,
 }
 

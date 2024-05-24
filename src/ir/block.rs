@@ -1,11 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::{
-    index_vec::Key,
-    ir::{Instr, InstrKind, Value},
-    span::Span,
-    types::TypeId,
-};
+use crate::{index_vec::Key, span::Span, types::TypeId};
+
+use super::{Instr, InstrKind, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
@@ -35,17 +32,15 @@ impl std::fmt::Display for BlockId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block<'a> {
+pub struct Block {
     pub id:     BlockId,
-    pub scope:  u32,
-    pub instrs: VecDeque<Instr<'a>>,
+    pub instrs: VecDeque<Instr>,
 }
 
-impl<'a> Block<'a> {
-    pub fn new(id: BlockId, scope: u32) -> Self {
+impl Block {
+    pub fn new(id: BlockId) -> Self {
         Self {
             id,
-            scope,
             instrs: VecDeque::new(),
         }
     }
@@ -59,25 +54,16 @@ impl<'a> Block<'a> {
         })
     }
 
-    pub fn id(&self) -> BlockId {
-        self.id
-    }
-
-    pub fn push_front(&mut self, instr: Instr<'a>) {
+    pub fn push_front(&mut self, instr: Instr) {
         self.instrs.push_front(instr)
     }
 
-    pub fn push_back(&mut self, kind: InstrKind<'a>, span: Span, ty: TypeId) {
+    pub fn push_back(&mut self, kind: InstrKind, span: Span, ty: TypeId) {
         self.instrs.push_back(Instr::new(kind, span, ty, self.id))
     }
 
-    pub fn instrs(&self) -> impl Iterator<Item = &Instr<'a>> {
+    pub fn instrs(&self) -> impl Iterator<Item = &Instr> {
         self.instrs.iter()
-    }
-
-    pub fn remove_nops(&mut self) {
-        self.instrs.retain(|i| !i.kind.is_nop());
-        self.instrs.shrink_to_fit();
     }
 
     pub fn set_label(&mut self) {
@@ -89,7 +75,7 @@ impl<'a> Block<'a> {
         self.push_front(instr)
     }
 
-    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr<'a>> {
+    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr> {
         self.instrs.iter_mut()
     }
 

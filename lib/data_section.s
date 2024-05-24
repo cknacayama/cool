@@ -1,13 +1,13 @@
 Object.Table:
     .quad 0
-    .quad Object.New
+    .quad Object.new
     .quad Object.abort
     .quad Object.type_name
     .quad Object.copy
 
 String.Table:
     .quad Object.Table
-    .quad String.New
+    .quad String.new
     .quad Object.abort
     .quad String.type_name
     .quad Object.copy
@@ -17,21 +17,21 @@ String.Table:
 
 Int.Table:
     .quad Object.Table
-    .quad Int.New
+    .quad Int.new
     .quad Object.abort
     .quad Int.type_name
     .quad Int.copy
 
 Bool.Table:
     .quad Object.Table
-    .quad Bool.New
+    .quad Bool.new
     .quad Object.abort
     .quad Bool.type_name
     .quad Bool.copy
 
 IO.Table:
     .quad Object.Table
-    .quad IO.New
+    .quad IO.new
     .quad Object.abort
     .quad IO.type_name
     .quad Object.copy

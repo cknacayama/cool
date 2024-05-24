@@ -142,9 +142,7 @@ impl<'a> Checker<'a> {
         let parent_data = self.class_env.get_class(parent).unwrap();
 
         let mut vtable = parent_data.vtable().to_vec();
-        vtable[0].0 = parent_data.id();
-        vtable[1].0 = id;
-        vtable[3].0 = id;
+        vtable[0].0 = parent;
 
         let data = ClassTypeData::new(
             id,
@@ -829,9 +827,12 @@ impl<'a> PrototypeChecker<'a> {
 
         let mut vtable = parent_data.vtable().to_vec();
 
-        vtable[0].0 = parent_data.id();
-        vtable[1].0 = id;
-        vtable[3].0 = id;
+        let ty = Type::Class(id);
+        let ty_id = self.get_type(&ty).unwrap();
+
+        vtable[0].0 = parent_id;
+        vtable[1].0 = ty_id;
+        vtable[3].0 = ty_id;
 
         let data = ClassTypeData::new(
             id,
@@ -841,10 +842,6 @@ impl<'a> PrototypeChecker<'a> {
             vtable,
         )
         .map_err(|kind| TypeError::new(kind, *span))?;
-
-        let ty = Type::Class(id);
-
-        let ty_id = self.get_type(&ty).unwrap();
 
         self.env
             .as_mut()

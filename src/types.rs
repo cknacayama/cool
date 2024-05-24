@@ -216,7 +216,7 @@ impl TypeId {
         }
     }
 
-    pub fn size_of(self) -> usize {
+    pub const fn size_of(self) -> usize {
         match self {
             TypeId::BOOL => 1,
             TypeId::INT => 8,
@@ -373,7 +373,7 @@ pub struct ClassTypeData<'a> {
     parent:  Option<TypeId>,
     attrs:   HashMap<&'a str, TypeId>,
     methods: HashMap<&'a str, MethodTypeData<'a>>,
-    vtable:  Vec<(&'a str, &'a str)>,
+    vtable:  Vec<(TypeId, &'a str)>,
 }
 
 impl<'a> ClassTypeData<'a> {
@@ -382,7 +382,7 @@ impl<'a> ClassTypeData<'a> {
         parent: Option<TypeId>,
         attrs: HashMap<&'a str, TypeId>,
         methods: HashMap<&'a str, MethodTypeData<'a>>,
-        vtable: Vec<(&'a str, &'a str)>,
+        vtable: Vec<(TypeId, &'a str)>,
     ) -> Result<Self, TypeErrorKind<'static>> {
         match parent {
             Some(TypeId::SelfType) => Err(TypeErrorKind::CannotInheritFromSelf),
@@ -415,11 +415,11 @@ impl<'a> ClassTypeData<'a> {
         &self.methods
     }
 
-    pub fn vtable(&self) -> &[(&'a str, &'a str)] {
+    pub fn vtable(&self) -> &[(TypeId, &'a str)] {
         &self.vtable
     }
 
-    pub fn get_vtable_entry(&self, method: &str) -> Option<&str> {
+    pub fn get_vtable_entry(&self, method: &str) -> Option<TypeId> {
         self.vtable
             .iter()
             .find_map(|(id, m)| if *m == method { Some(*id) } else { None })
@@ -481,8 +481,8 @@ impl<'a> ClassEnv<'a> {
         }
 
         macro_rules! builtin_vtable {
-            ($id:literal, [ $($method:expr),* ]) => {
-                vec![ ("Object", "Table"), ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+            ($id:expr, [ $($method:expr),* ]) => {
+                vec![ (TypeId::OBJECT, "Table"), ($id, "new"), (TypeId::OBJECT, "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
             };
         }
 
@@ -495,7 +495,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("type_name", [], TypeId::STRING),
                 builtin_method!("copy", [], TypeId::SelfType),
             ]),
-            builtin_vtable!("Object", []),
+            builtin_vtable!(TypeId::OBJECT, []),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
@@ -503,7 +503,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
-            builtin_vtable!("Bool", []),
+            builtin_vtable!(TypeId::BOOL, []),
         )
         .unwrap();
         let int = ClassTypeData::new(
@@ -511,7 +511,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
-            builtin_vtable!("Int", []),
+            builtin_vtable!(TypeId::INT, []),
         )
         .unwrap();
         let string = ClassTypeData::new(
@@ -523,7 +523,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
                 builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ]),
-            builtin_vtable!("String", ["length", "concat", "substr"]),
+            builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
@@ -536,17 +536,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("in_string", [], TypeId::STRING),
                 builtin_method!("in_int", [], TypeId::INT),
             ]),
-            vec![
-                ("Object", "Table"),
-                ("IO", "New"),
-                ("Object", "abort"),
-                ("IO", "type_name"),
-                ("Object", "copy"),
-                ("IO", "out_string"),
-                ("IO", "out_int"),
-                ("IO", "in_string"),
-                ("IO", "in_int"),
-            ],
+            builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
 
@@ -581,8 +571,8 @@ impl<'a> ClassEnv<'a> {
         }
 
         macro_rules! builtin_vtable {
-            ($id:literal, [ $($method:expr),* ]) => {
-                vec![ ("Object", "Table"), ($id, "New"), ("Object", "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
+            ($id:expr, [ $($method:expr),* ]) => {
+                vec![ (TypeId::OBJECT, "Table"), ($id, "new"), (TypeId::OBJECT, "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
             };
         }
 
@@ -595,7 +585,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("type_name", [], TypeId::STRING),
                 builtin_method!("copy", [], TypeId::SelfType),
             ]),
-            builtin_vtable!("Object", []),
+            builtin_vtable!(TypeId::OBJECT, []),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
@@ -603,7 +593,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
-            builtin_vtable!("Bool", []),
+            builtin_vtable!(TypeId::BOOL, []),
         )
         .unwrap();
         let int = ClassTypeData::new(
@@ -611,7 +601,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             HashMap::new(),
             HashMap::new(),
-            builtin_vtable!("Int", []),
+            builtin_vtable!(TypeId::INT, []),
         )
         .unwrap();
         let string = ClassTypeData::new(
@@ -623,7 +613,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
                 builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ]),
-            builtin_vtable!("String", ["length", "concat", "substr"]),
+            builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
@@ -636,17 +626,7 @@ impl<'a> ClassEnv<'a> {
                 builtin_method!("in_string", [], TypeId::STRING),
                 builtin_method!("in_int", [], TypeId::INT),
             ]),
-            vec![
-                ("Object", "Table"),
-                ("IO", "New"),
-                ("Object", "abort"),
-                ("IO", "type_name"),
-                ("Object", "copy"),
-                ("IO", "out_string"),
-                ("IO", "out_int"),
-                ("IO", "in_string"),
-                ("IO", "in_int"),
-            ],
+            builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
 
@@ -677,6 +657,10 @@ impl<'a> ClassEnv<'a> {
             Some(class_id) => Err(TypeErrorKind::RedefinedClass(class_id)),
             None => Ok(id),
         }
+    }
+
+    pub fn classes(&self) -> impl Iterator<Item = (TypeId, &ClassTypeData<'a>)> {
+        self.classes.iter()
     }
 
     pub fn get_class(&self, ty: TypeId) -> Result<&ClassTypeData<'a>, TypeErrorKind<'a>> {
@@ -766,8 +750,8 @@ impl<'a> ClassEnv<'a> {
         let class_data = &mut self.classes[ty];
 
         match class_data.vtable.iter_mut().find(|(_, m)| *m == method) {
-            Some((id, _)) => *id = class_data.id,
-            None => class_data.vtable.push((class_data.id, method)),
+            Some((id, _)) => *id = ty,
+            None => class_data.vtable.push((ty, method)),
         }
 
         match class_data.methods.insert(method, data) {
