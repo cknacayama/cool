@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{index_vec::Key, span::Span, types::TypeId};
+use crate::{index_vec::Key, types::TypeId};
 
 use super::{Instr, InstrKind, Value};
 
@@ -34,14 +34,18 @@ impl std::fmt::Display for BlockId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub id:     BlockId,
+    pub idom:   Option<BlockId>,
     pub instrs: VecDeque<Instr>,
+    pub sdoms:  Vec<BlockId>,
 }
 
 impl Block {
     pub fn new(id: BlockId) -> Self {
         Self {
             id,
+            idom: None,
             instrs: VecDeque::new(),
+            sdoms: vec![],
         }
     }
 
@@ -58,8 +62,8 @@ impl Block {
         self.instrs.push_front(instr)
     }
 
-    pub fn push_back(&mut self, kind: InstrKind, span: Span, ty: TypeId) {
-        self.instrs.push_back(Instr::new(kind, span, ty, self.id))
+    pub fn push_back(&mut self, kind: InstrKind, ty: TypeId) {
+        self.instrs.push_back(Instr::new(kind, ty))
     }
 
     pub fn instrs(&self) -> impl Iterator<Item = &Instr> {
@@ -71,7 +75,7 @@ impl Block {
             return;
         }
         let kind = InstrKind::Label(self.id);
-        let instr = Instr::new(kind, Span::default(), TypeId::SelfType, self.id);
+        let instr = Instr::new(kind, TypeId::SelfType);
         self.push_front(instr)
     }
 

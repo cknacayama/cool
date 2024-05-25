@@ -266,20 +266,13 @@ impl fmt::Display for InstrKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instr {
-    pub kind:  InstrKind,
-    pub span:  Span,
-    pub ty:    TypeId,
-    pub block: BlockId,
+    pub kind: InstrKind,
+    pub ty:   TypeId,
 }
 
 impl Instr {
-    pub fn new(kind: InstrKind, span: Span, ty: TypeId, block: BlockId) -> Self {
-        Self {
-            kind,
-            span,
-            ty,
-            block,
-        }
+    pub fn new(kind: InstrKind, ty: TypeId) -> Self {
+        Self { kind, ty }
     }
 }
 

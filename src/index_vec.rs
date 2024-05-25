@@ -1,4 +1,7 @@
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    ops::{Range, RangeFrom},
+};
 
 pub trait Key: Copy {
     fn to_index(self) -> usize;
@@ -46,6 +49,10 @@ impl<K: Key, V> IndexVec<K, V> {
         self.values.push(value);
     }
 
+    pub fn insert(&mut self, key: K, value: V) {
+        self.values.insert(key.to_index(), value);
+    }
+
     pub fn get(&self, key: K) -> Option<&V> {
         self.values.get(key.to_index())
     }
@@ -76,8 +83,12 @@ impl<K: Key, V> IndexVec<K, V> {
         }
     }
 
-    pub fn inner(&self) -> &Vec<V> {
+    pub fn inner(&self) -> &[V] {
         &self.values
+    }
+
+    pub fn indices(&self) -> impl Iterator<Item = K> {
+        (0..self.values.len()).map(K::from_index)
     }
 
     pub fn inner_mut(&mut self) -> &mut Vec<V> {
@@ -143,6 +154,34 @@ impl<K: Key, V> core::ops::Index<K> for IndexVec<K, V> {
 impl<K: Key, V> core::ops::IndexMut<K> for IndexVec<K, V> {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         &mut self.values[index.to_index()]
+    }
+}
+
+impl<K: Key, V> core::ops::Index<Range<K>> for IndexVec<K, V> {
+    type Output = [V];
+
+    fn index(&self, index: Range<K>) -> &Self::Output {
+        &self.values[index.start.to_index()..index.end.to_index()]
+    }
+}
+
+impl<K: Key, V> core::ops::IndexMut<Range<K>> for IndexVec<K, V> {
+    fn index_mut(&mut self, index: Range<K>) -> &mut Self::Output {
+        &mut self.values[index.start.to_index()..index.end.to_index()]
+    }
+}
+
+impl<K: Key, V> core::ops::Index<RangeFrom<K>> for IndexVec<K, V> {
+    type Output = [V];
+
+    fn index(&self, index: RangeFrom<K>) -> &Self::Output {
+        &self.values[index.start.to_index()..]
+    }
+}
+
+impl<K: Key, V> core::ops::IndexMut<RangeFrom<K>> for IndexVec<K, V> {
+    fn index_mut(&mut self, index: RangeFrom<K>) -> &mut Self::Output {
+        &mut self.values[index.start.to_index()..]
     }
 }
 
