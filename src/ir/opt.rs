@@ -505,15 +505,17 @@ impl FunctionOptmizer {
         fn rename(
             function: &mut Function,
             block: BlockId,
-            renames: &mut HashMap<IrId, IrId>,
+            renames: &mut HashMap<IrId, Vec<IrId>>,
             cur_tmp: &mut IrId,
             preds: &Predecessors,
             dom_tree: &DominatorTree,
         ) {
-            let cur = renames.clone();
-
+            let mut defined = vec![];
             for instr in function.instrs_block_mut(block) {
-                instr.kind.rename(renames, cur_tmp);
+                instr
+                    .kind
+                    .rename(renames, cur_tmp)
+                    .map(|id| defined.push(id));
             }
 
             function.successors_instrs_visit(block, |(s, i)| {
@@ -523,7 +525,7 @@ impl FunctionOptmizer {
                     _ => None,
                 }) {
                     if let Value::Id(id) = args[j].0 {
-                        args[j].0 = Value::Id(renames[&id]);
+                        args[j].0 = Value::Id(*renames[&id].last().unwrap());
                         args[j].1 = block;
                     }
                 }
@@ -533,7 +535,9 @@ impl FunctionOptmizer {
                 rename(function, child, renames, cur_tmp, preds, dom_tree);
             }
 
-            *renames = cur;
+            for id in defined.iter() {
+                renames.get_mut(id).unwrap().pop();
+            }
         }
 
         let mut renames = HashMap::new();
@@ -657,7 +661,11 @@ impl FunctionOptmizer {
 }
 
 impl InstrKind {
-    pub fn rename(&mut self, renames: &mut HashMap<IrId, IrId>, tmp: &mut IrId) -> bool {
+    pub fn rename(
+        &mut self,
+        renames: &mut HashMap<IrId, Vec<IrId>>,
+        tmp: &mut IrId,
+    ) -> Option<IrId> {
         match self {
             Self::Nop
             | Self::Function { .. }
@@ -667,57 +675,64 @@ impl InstrKind {
 
             Self::Local(_, _) => {
                 *self = Self::Nop;
-                return true;
             }
 
             Self::JmpCond { src: id, .. } => {
-                let cur_id = renames.get(id).unwrap();
+                let cur_id = renames.get(id).unwrap().last().unwrap();
                 *id = *cur_id;
             }
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
-                    let cur_id = renames.get(id).unwrap();
+                    let cur_id = renames.get(id).unwrap().last().unwrap();
                     *id = *cur_id;
                 }
             }
 
             Self::Store(id1, _, id2) if id1.is_ptr() => {
-                let cur_id1 = renames.get(id1).unwrap();
+                let cur_id1 = renames.get(id1).unwrap().last().unwrap();
                 *id1 = *cur_id1;
                 if let Value::Id(id2) = id2 {
-                    let cur_id2 = renames.get(id2).unwrap();
+                    let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
                 }
             }
 
             Self::Store(id1, _, val) => match val {
                 Value::Id(id) => {
-                    let cur_id = *renames.get(id).unwrap();
+                    let cur_id = *renames.get(id).unwrap().last().unwrap();
                     let new_id = tmp.next_mut();
-                    renames.insert(*id1, new_id);
+                    let old_id = *id1;
+                    renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                     *self = Self::Assign(new_id, Value::Id(cur_id));
+                    return Some(old_id);
                 }
                 _ => {
                     let new_id = tmp.next_mut();
-                    renames.insert(*id1, new_id);
+                    let old_id = *id1;
+                    renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                     *id1 = new_id;
+                    return Some(old_id);
                 }
             },
 
             Self::AssignLoad { dst, src, .. } if src.is_ptr() => {
-                let cur_id2 = renames.get(src).unwrap();
+                let cur_id2 = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id2;
                 let new_id = tmp.next_mut();
-                renames.insert(*dst, new_id);
+                let old_id = *dst;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *dst = new_id;
+                return Some(old_id);
             }
 
             Self::AssignLoad { dst, src, .. } => {
-                let cur_id2 = *renames.get(src).unwrap();
+                let cur_id2 = *renames.get(src).unwrap().last().unwrap();
                 let new_id = tmp.next_mut();
-                renames.insert(*dst, new_id);
+                let old_id = *dst;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
+                return Some(old_id);
             }
 
             Self::AssignBin {
@@ -726,13 +741,15 @@ impl InstrKind {
                 rhs: Value::Id(rhs),
                 ..
             } => {
-                let cur_lhs = renames.get(lhs).unwrap();
+                let cur_lhs = renames.get(lhs).unwrap().last().unwrap();
                 *lhs = *cur_lhs;
-                let cur_rhs = renames.get(rhs).unwrap();
+                let cur_rhs = renames.get(rhs).unwrap().last().unwrap();
                 *rhs = *cur_rhs;
                 let new_id = tmp.next_mut();
-                renames.insert(*dst, new_id);
+                let old_id = *dst;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *dst = new_id;
+                return Some(old_id);
             }
 
             Self::Assign(dst, Value::Id(src))
@@ -748,36 +765,42 @@ impl InstrKind {
                 rhs: Value::Id(src),
                 ..
             } => {
-                let cur_id = renames.get(src).unwrap();
+                let cur_id = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id;
                 let new_id = tmp.next_mut();
-                renames.insert(*dst, new_id);
+                let old_id = *dst;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *dst = new_id;
+                return Some(old_id);
             }
 
             Self::AssignCall(id1, id2, args) => {
                 if !id2.is_global() {
-                    let cur_id2 = renames.get(id2).unwrap();
+                    let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
                 }
                 for id in args.iter_mut().filter_map(|(_, val)| match val {
                     Value::Id(id) => Some(id),
                     _ => None,
                 }) {
-                    let cur_id = renames.get(id).unwrap();
+                    let cur_id = renames.get(id).unwrap().last().unwrap();
                     *id = *cur_id;
                 }
                 let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
+                let old_id = *id1;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *id1 = new_id;
+                return Some(old_id);
             }
 
             Self::AssignExtract(id1, id2, _) => {
-                let cur_id2 = renames.get(id2).unwrap();
+                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                 *id2 = *cur_id2;
                 let new_id = tmp.next_mut();
-                renames.insert(*id1, new_id);
+                let old_id = *id1;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *id1 = new_id;
+                return Some(old_id);
             }
 
             Self::Param(_, dst)
@@ -786,8 +809,10 @@ impl InstrKind {
             | Self::AssignBin { dst, .. }
             | Self::AssignToObj(dst, _, _) => {
                 let new_id = tmp.next_mut();
-                renames.insert(*dst, new_id);
+                let old_id = *dst;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *dst = new_id;
+                return Some(old_id);
             }
 
             Self::Phi(id, vals) => {
@@ -796,17 +821,19 @@ impl InstrKind {
                         Value::Id(id) if !id.is_renamed() => Some(id),
                         _ => None,
                     }) {
-                        let cur_val = renames.get(val).unwrap();
+                        let cur_val = renames.get(val).unwrap().last().unwrap();
                         *val = *cur_val;
                     }
                 }
                 let new_id = tmp.next_mut();
-                renames.insert(*id, new_id);
+                let old_id = *id;
+                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
                 *id = new_id;
+                return Some(old_id);
             }
         }
 
-        false
+        None
     }
 
     fn replace_with_nop(&mut self) {
