@@ -29,6 +29,10 @@ impl<K: Key, V> IndexVec<K, V> {
         }
     }
 
+    pub fn shrink_to_fit(&mut self) {
+        self.values.shrink_to_fit();
+    }
+
     pub fn extend(&mut self, iter: impl IntoIterator<Item = V>) {
         self.values.extend(iter);
     }

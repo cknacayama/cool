@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     slice::IterMut,
 };
 
@@ -45,23 +45,26 @@ impl Key for InstrId {
     }
 }
 
+pub struct BlockData {
+    start: InstrId,
+    end:   InstrId,
+    id:    BlockId,
+}
+
 pub struct Function {
     instrs: IndexVec<InstrId, Instr>,
-    blocks: IndexVec<BlockId, (InstrId, InstrId, BlockId)>,
+    blocks: IndexVec<BlockId, BlockData>,
 }
 
 impl Function {
-    pub fn new(
-        instrs: IndexVec<InstrId, Instr>,
-        blocks: IndexVec<BlockId, (InstrId, InstrId, BlockId)>,
-    ) -> Self {
+    pub fn new(instrs: IndexVec<InstrId, Instr>, blocks: IndexVec<BlockId, BlockData>) -> Self {
         Self { instrs, blocks }
     }
 
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
-        let (_, block_end, _) = &self.blocks[block];
+        let BlockData { end, .. } = self.blocks[block];
 
-        let block_end = block_end.prev();
+        let block_end = end.prev();
 
         match self.instrs[block_end].kind {
             InstrKind::Jmp(target) => {
@@ -83,10 +86,10 @@ impl Function {
         block: BlockId,
         mut f: F,
     ) {
-        let (_, block_end, _) = &self.blocks[block];
-        let block_end = block_end.prev();
+        let BlockData { end, .. } = self.blocks[block];
+        let end = end.prev();
 
-        match self.instrs[block_end].kind {
+        match self.instrs[end].kind {
             InstrKind::Jmp(target) => {
                 f((target, self.instrs_block_mut(target).iter_mut()));
             }
@@ -102,12 +105,12 @@ impl Function {
     }
 
     fn instrs_block(&self, block: BlockId) -> &[Instr] {
-        let (start, end, _) = self.blocks[block];
+        let BlockData { start, end, .. } = self.blocks[block];
         &self.instrs[start..end]
     }
 
     fn instrs_block_mut(&mut self, block: BlockId) -> &mut [Instr] {
-        let (start, end, _) = self.blocks[block];
+        let BlockData { start, end, .. } = self.blocks[block];
         &mut self.instrs[start..end]
     }
 }
@@ -132,7 +135,12 @@ impl FunctionOptmizer {
             let start = instrs.len();
             instrs.extend(block.instrs);
             let end = instrs.len();
-            blocks.push((InstrId(start), InstrId(end), block.id));
+            let block_data = BlockData {
+                start: InstrId(start),
+                end:   InstrId(end),
+                id:    block.id,
+            };
+            blocks.push(block_data);
             idoms.push(block.idom.unwrap_or(BlockId::ENTRY));
             dom_tree.push(block.doms);
         }
@@ -149,11 +157,11 @@ impl FunctionOptmizer {
         self.function.blocks.indices()
     }
 
-    fn blocks(&self) -> &IndexVec<BlockId, (InstrId, InstrId, BlockId)> {
+    fn blocks(&self) -> &IndexVec<BlockId, BlockData> {
         &self.function.blocks
     }
 
-    fn blocks_mut(&mut self) -> &mut IndexVec<BlockId, (InstrId, InstrId, BlockId)> {
+    fn blocks_mut(&mut self) -> &mut IndexVec<BlockId, BlockData> {
         &mut self.function.blocks
     }
 
@@ -173,6 +181,14 @@ impl FunctionOptmizer {
         self.function.blocks.len()
     }
 
+    fn instrs_count(&self) -> usize {
+        self.function.instrs.len()
+    }
+
+    fn phis_count(phis: &PhiPositions) -> usize {
+        phis.iter().map(|(_, phis)| phis.len()).sum()
+    }
+
     pub fn optimize(&mut self) {
         let preds = self.predecessors();
         let dom_frontiers = self.dominance_frontiers(&preds);
@@ -181,6 +197,8 @@ impl FunctionOptmizer {
         self.mem2reg(&preds, phis);
 
         while self.const_propagation() | self.dead_code_elimination() {}
+
+        self.remove_nops();
     }
 
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, f: F) {
@@ -223,7 +241,11 @@ impl FunctionOptmizer {
         let removed = len != self.blocks_count();
 
         if removed {
-            for (id, (_, _, block)) in self.blocks_mut() {
+            for (id, block) in self
+                .blocks_mut()
+                .into_iter()
+                .map(|(id, block)| (id, &mut block.id))
+            {
                 new_blocks[*block] = Some(id);
                 *block = id;
             }
@@ -232,28 +254,6 @@ impl FunctionOptmizer {
         }
 
         removed
-    }
-
-    fn remove_unecessary_phis(&mut self, undeclared_vars: &HashSet<IrId>) -> bool {
-        let mut changed = false;
-        for (_, instr) in self.instrs_mut() {
-            if let InstrKind::Phi(ref id, ref mut vals) = instr.kind {
-                vals.retain(|(val, _)| match val {
-                    Value::Id(id) if undeclared_vars.contains(id) => {
-                        changed = true;
-                        false
-                    }
-                    _ => true,
-                });
-                if vals.is_empty() {
-                    instr.kind.replace_with_nop();
-                } else if vals.len() == 1 {
-                    let val = vals[0].0.clone();
-                    instr.kind = InstrKind::Assign(*id, val);
-                }
-            }
-        }
-        changed
     }
 
     fn rename_blocks(&mut self, new_blocks: &IndexVec<BlockId, Option<BlockId>>) {
@@ -290,7 +290,7 @@ impl FunctionOptmizer {
                         *on_false = new_target
                     }
                 }
-                InstrKind::Phi(_, ref mut vals) => {
+                InstrKind::Phi(id, ref mut vals) => {
                     vals.retain_mut(|(_, block)| match new_blocks[*block] {
                         Some(new_block) => {
                             *block = new_block;
@@ -298,6 +298,12 @@ impl FunctionOptmizer {
                         }
                         None => false,
                     });
+                    if vals.is_empty() {
+                        instr.kind.replace_with_nop();
+                    } else if vals.len() == 1 {
+                        let val = vals[0].0.clone();
+                        instr.kind = InstrKind::Assign(id, val);
+                    }
                 }
                 _ => {}
             }
@@ -512,10 +518,9 @@ impl FunctionOptmizer {
         ) {
             let mut defined = vec![];
             for instr in function.instrs_block_mut(block) {
-                instr
-                    .kind
-                    .rename(renames, cur_tmp)
-                    .map(|id| defined.push(id));
+                if let Some(id) = instr.kind.rename(renames, cur_tmp) {
+                    defined.push(id);
+                }
             }
 
             function.successors_instrs_visit(block, |(s, i)| {
@@ -550,31 +555,86 @@ impl FunctionOptmizer {
             &mut cur_tmp,
             preds,
             &self.dom_tree,
-        );
+        )
     }
 
     fn insert_phis(&mut self, phis: PhiPositions) {
-        for (block, phis) in phis.into_iter() {
-            for (local, args, ty) in phis {
-                let kind = InstrKind::Phi(
-                    IrId::Local(local),
-                    args.into_vec()
-                        .into_iter()
-                        .map(|(val, block)| (Value::Id(IrId::Local(val)), block))
-                        .collect(),
-                );
-                let instr = Instr::new(kind, ty);
-                let (start, _, _) = self.blocks()[block];
-                self.instrs_mut().insert(start.next(), instr);
-                let (_, end, _) = &mut self.blocks_mut()[block];
-                *end = end.next();
+        let mut instrs = IndexVec::with_capacity(self.instrs_count() + Self::phis_count(&phis));
+        std::mem::swap(&mut instrs, &mut self.function.instrs);
 
-                for block in self.blocks_mut()[block..].iter_mut().skip(1) {
-                    block.0 = block.0.next();
-                    block.1 = block.1.next();
+        let mut instrs = instrs.into_inner().into_iter();
+
+        self.instrs_mut().push(instrs.next().unwrap());
+
+        for (block, phis) in phis.into_iter() {
+            if !block.is_entry() {
+                self.instrs_mut()
+                    .push(Instr::new(InstrKind::Label(block), TypeId::SelfType));
+            }
+            self.instrs_mut()
+                .extend(phis.into_iter().map(|(local, args, ty)| {
+                    let kind = InstrKind::Phi(
+                        IrId::Local(local),
+                        args.into_vec()
+                            .into_iter()
+                            .map(|(val, block)| (Value::Id(IrId::Local(val)), block))
+                            .collect(),
+                    );
+                    Instr::new(kind, ty)
+                }));
+            let block_len =
+                self.blocks()[block].end.to_index() - self.blocks()[block].start.to_index();
+
+            self.instrs_mut().extend(
+                instrs
+                    .by_ref()
+                    .skip_while(|instr| matches!(instr.kind, InstrKind::Label(_)))
+                    .take(block_len - 1),
+            );
+        }
+
+        self.update_blocks();
+    }
+
+    fn remove_nops(&mut self) {
+        self.function.instrs.retain(|instr| !instr.kind.is_nop());
+        self.function.instrs.shrink_to_fit();
+        self.update_blocks();
+    }
+
+    fn update_blocks(&mut self) {
+        let mut cur_block = BlockId::ENTRY;
+        let mut cur_start = InstrId(0);
+        let mut blocks = IndexVec::with_capacity(self.blocks_count());
+
+        for (id, instr) in self.instrs() {
+            match instr.kind {
+                InstrKind::Label(block) => {
+                    let data = BlockData {
+                        start: cur_start,
+                        end:   id,
+                        id:    cur_block,
+                    };
+
+                    blocks.push(data);
+
+                    cur_block = block;
+                    cur_start = id;
                 }
+                InstrKind::Return(_) => {
+                    let data = BlockData {
+                        start: cur_start,
+                        end:   id.next(),
+                        id:    cur_block,
+                    };
+
+                    blocks.push(data);
+                }
+                _ => {}
             }
         }
+
+        self.function.blocks = blocks;
     }
 
     fn mem2reg(&mut self, preds: &Predecessors, phis: PhiPositions) {
@@ -627,15 +687,6 @@ impl FunctionOptmizer {
                 }
             }
         }
-
-        let undeclared_vars: HashSet<_> = counter
-            .into_iter()
-            .filter_map(|(id, (_, decl, _))| match decl {
-                Some(_) => None,
-                None => Some(id),
-            })
-            .collect();
-        res |= self.remove_unecessary_phis(&undeclared_vars);
 
         res
     }
@@ -703,14 +754,14 @@ impl InstrKind {
                     let cur_id = *renames.get(id).unwrap().last().unwrap();
                     let new_id = tmp.next_mut();
                     let old_id = *id1;
-                    renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                    renames.entry(old_id).or_default().push(new_id);
                     *self = Self::Assign(new_id, Value::Id(cur_id));
                     return Some(old_id);
                 }
                 _ => {
                     let new_id = tmp.next_mut();
                     let old_id = *id1;
-                    renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                    renames.entry(old_id).or_default().push(new_id);
                     *id1 = new_id;
                     return Some(old_id);
                 }
@@ -721,7 +772,7 @@ impl InstrKind {
                 *src = *cur_id2;
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
                 return Some(old_id);
             }
@@ -730,7 +781,7 @@ impl InstrKind {
                 let cur_id2 = *renames.get(src).unwrap().last().unwrap();
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
                 return Some(old_id);
             }
@@ -747,7 +798,7 @@ impl InstrKind {
                 *rhs = *cur_rhs;
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
                 return Some(old_id);
             }
@@ -769,7 +820,7 @@ impl InstrKind {
                 *src = *cur_id;
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
                 return Some(old_id);
             }
@@ -788,7 +839,7 @@ impl InstrKind {
                 }
                 let new_id = tmp.next_mut();
                 let old_id = *id1;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *id1 = new_id;
                 return Some(old_id);
             }
@@ -798,7 +849,7 @@ impl InstrKind {
                 *id2 = *cur_id2;
                 let new_id = tmp.next_mut();
                 let old_id = *id1;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *id1 = new_id;
                 return Some(old_id);
             }
@@ -810,7 +861,7 @@ impl InstrKind {
             | Self::AssignToObj(dst, _, _) => {
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
                 return Some(old_id);
             }
@@ -827,7 +878,7 @@ impl InstrKind {
                 }
                 let new_id = tmp.next_mut();
                 let old_id = *id;
-                renames.entry(old_id).or_insert_with(Vec::new).push(new_id);
+                renames.entry(old_id).or_default().push(new_id);
                 *id = new_id;
                 return Some(old_id);
             }
@@ -925,9 +976,10 @@ impl InstrKind {
     }
 
     fn try_replace(values: &HashMap<IrId, Value>, val: &mut Value) {
-        if let Value::Id(id) = val {
-            if let Some(new_val) = values.get(id) {
-                *val = new_val.clone();
+        while let Value::Id(id) = val {
+            match values.get(id) {
+                Some(new_val) => *val = new_val.clone(),
+                None => break,
             }
         }
     }

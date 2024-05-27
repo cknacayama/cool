@@ -31,7 +31,7 @@ impl std::fmt::Display for BlockId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Block {
     pub id:     BlockId,
     pub idom:   Option<BlockId>,
