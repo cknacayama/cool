@@ -134,6 +134,30 @@ impl<K: Key, V> IntoIterator for IndexVec<K, V> {
     }
 }
 
+impl<'a, K: Key, V> IntoIterator for &'a IndexVec<K, V> {
+    type Item = (K, &'a V);
+    type IntoIter = Iter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            values:  self.values.iter(),
+            current: K::from_index(0),
+        }
+    }
+}
+
+impl<'a, K: Key, V> IntoIterator for &'a mut IndexVec<K, V> {
+    type Item = (K, &'a mut V);
+    type IntoIter = IterMut<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IterMut {
+            values:  self.values.iter_mut(),
+            current: K::from_index(0),
+        }
+    }
+}
+
 impl<K: Key, V> From<Vec<V>> for IndexVec<K, V> {
     fn from(values: Vec<V>) -> Self {
         Self {

@@ -15,7 +15,7 @@ use super::{
 };
 
 #[derive(Debug)]
-pub struct MethodBuilder<'a> {
+pub struct FunctionBuilder<'a> {
     class:             TypeId,
     pub(super) blocks: IndexVec<BlockId, Block>,
     cur_locals:        Vec<HashMap<&'a str, IrId>>,
@@ -23,7 +23,7 @@ pub struct MethodBuilder<'a> {
     cur_tmp:           u32,
 }
 
-impl<'a> MethodBuilder<'a> {
+impl<'a> FunctionBuilder<'a> {
     pub fn new(class: TypeId) -> Self {
         Self {
             class,
@@ -97,7 +97,7 @@ impl<'a> MethodBuilder<'a> {
 
     fn set_dom(&mut self, idom: BlockId, block: BlockId) {
         self.blocks[block].idom = Some(idom);
-        self.blocks[idom].sdoms.push(block);
+        self.blocks[idom].doms.push(block);
     }
 
     fn cur_scope_mut(&mut self) -> &mut HashMap<&'a str, IrId> {
@@ -236,7 +236,7 @@ impl<'a> MethodBuilder<'a> {
 
 #[derive(Debug)]
 pub enum GlobalValue<'a> {
-    Method(MethodBuilder<'a>),
+    Function(FunctionBuilder<'a>),
     Vtable(InstrKind),
 }
 
@@ -258,8 +258,8 @@ impl<'a> IrBuilder<'a> {
             let vtable = data
                 .vtable()
                 .iter()
-                .map(|(_, method)| {
-                    IrBuilder::new_method(&mut globals_map, &mut globals, class, method)
+                .map(|(_, function)| {
+                    IrBuilder::new_function(&mut globals_map, &mut globals, class, function)
                 })
                 .collect();
             IrBuilder::new_vtable(&mut globals_map, &mut globals, class, vtable);
@@ -278,19 +278,19 @@ impl<'a> IrBuilder<'a> {
         &self.strings
     }
 
-    pub fn methods(&self) -> impl Iterator<Item = &MethodBuilder<'a>> {
+    pub fn functions(&self) -> impl Iterator<Item = &FunctionBuilder<'a>> {
         self.globals.inner().iter().filter_map(|m| {
             m.as_ref().and_then(|m| match m {
-                GlobalValue::Method(m) => Some(m),
+                GlobalValue::Function(m) => Some(m),
                 _ => None,
             })
         })
     }
 
-    pub fn methods_mut(&mut self) -> impl Iterator<Item = &mut MethodBuilder<'a>> {
+    pub fn functions_mut(&mut self) -> impl Iterator<Item = &mut FunctionBuilder<'a>> {
         self.globals.inner_mut().iter_mut().filter_map(|m| {
             m.as_mut().and_then(|m| match m {
-                GlobalValue::Method(m) => Some(m),
+                GlobalValue::Function(m) => Some(m),
                 _ => None,
             })
         })
@@ -308,7 +308,7 @@ impl<'a> IrBuilder<'a> {
                 })
             })
             .chain(
-                self.methods()
+                self.functions()
                     .flat_map(|m| m.instrs_with_nops().map(|i| &i.kind)),
             );
         iter
@@ -318,71 +318,71 @@ impl<'a> IrBuilder<'a> {
         self.instrs_with_nops().filter(|i| !i.is_nop())
     }
 
-    fn cur_method_mut(&mut self) -> &mut MethodBuilder<'a> {
+    fn cur_function_mut(&mut self) -> &mut FunctionBuilder<'a> {
         match self.globals.last_mut() {
-            Some(Some(GlobalValue::Method(m))) => m,
+            Some(Some(GlobalValue::Function(m))) => m,
             _ => unreachable!(),
         }
     }
 
-    fn cur_method(&self) -> &MethodBuilder<'a> {
+    fn cur_function(&self) -> &FunctionBuilder<'a> {
         match self.globals.last() {
-            Some(Some(GlobalValue::Method(m))) => m,
+            Some(Some(GlobalValue::Function(m))) => m,
             _ => unreachable!(),
         }
     }
 
     fn get_local(&self, name: &'a str) -> IrId {
-        self.cur_method().get_local(name)
+        self.cur_function().get_local(name)
     }
 
     fn push_instr(&mut self, kind: InstrKind, ty: TypeId) {
-        self.cur_method_mut().push_instr(kind, ty)
+        self.cur_function_mut().push_instr(kind, ty)
     }
 
     fn begin_scope(&mut self) {
-        self.cur_method_mut().begin_scope()
+        self.cur_function_mut().begin_scope()
     }
 
     fn end_scope(&mut self) -> HashMap<&'a str, IrId> {
-        self.cur_method_mut().end_scope()
+        self.cur_function_mut().end_scope()
     }
 
-    fn end_method(&mut self) -> HashMap<&'a str, IrId> {
+    fn end_function(&mut self) -> HashMap<&'a str, IrId> {
         self.end_scope()
     }
 
     fn new_tmp(&mut self) -> IrId {
-        self.cur_method_mut().new_tmp()
+        self.cur_function_mut().new_tmp()
     }
 
     fn new_ptr(&mut self, name: &'a str, ty: TypeId) -> IrId {
-        self.cur_method_mut().new_ptr(name, ty)
+        self.cur_function_mut().new_ptr(name, ty)
     }
 
     fn begin_block(&mut self) -> BlockId {
-        self.cur_method_mut().begin_block()
+        self.cur_function_mut().begin_block()
     }
 
     fn patch_jmp_cond(&mut self, block: BlockId, on_true: BlockId, on_false: BlockId) {
-        self.cur_method_mut()
+        self.cur_function_mut()
             .patch_jmp_cond(block, on_true, on_false)
     }
 
     fn patch_jmp(&mut self, block: BlockId, target: BlockId) {
-        self.cur_method_mut().patch_jmp(block, target)
+        self.cur_function_mut().patch_jmp(block, target)
     }
 
     fn cur_block(&self) -> BlockId {
-        self.cur_method().cur_block()
+        self.cur_function().cur_block()
     }
 
     fn push_local(&mut self, name: &'a str, ty: TypeId) -> IrId {
-        self.cur_method_mut().push_local(name, ty)
+        self.cur_function_mut().push_local(name, ty)
     }
 
     fn set_dom(&mut self, idom: BlockId, block: BlockId) {
-        self.cur_method_mut().set_dom(idom, block)
+        self.cur_function_mut().set_dom(idom, block)
     }
 
     fn intern_string(&mut self, s: &str) -> Rc<str> {
@@ -408,7 +408,7 @@ impl<'a> IrBuilder<'a> {
         id
     }
 
-    fn new_method(
+    fn new_function(
         globals_map: &mut HashMap<(TypeId, &'a str), GlobalId>,
         globals: &mut IndexVec<GlobalId, Option<GlobalValue<'a>>>,
         ty: TypeId,
@@ -440,36 +440,36 @@ impl<'a> IrBuilder<'a> {
         // self.build_new(type_id);
 
         for method in methods.into_vec() {
-            self.build_method(method);
+            self.build_function(method);
         }
     }
 
-    fn build_method(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, IrId> {
+    fn build_function(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, IrId> {
         let id = typed_method.id();
         let params = typed_method.params();
 
-        let method_id = self.globals_map.get(&(self.cur_class, id)).unwrap();
-        let mut method = MethodBuilder::new(self.cur_class);
+        let function_id = self.globals_map.get(&(self.cur_class, id)).unwrap();
+        let mut function = FunctionBuilder::new(self.cur_class);
         let class_attrs = self.env.get_class(self.cur_class).unwrap().attrs();
 
-        method.begin_scope();
+        function.begin_scope();
         let mut instr_params = vec![self.cur_class];
         instr_params.extend(params.iter().map(|f| f.ty));
-        let kind = InstrKind::Method {
-            id:    IrId::Global(*method_id),
+        let kind = InstrKind::Function {
+            id:    IrId::Global(*function_id),
             ret:   typed_method.return_ty().size_of(),
             arity: instr_params.len(),
         };
-        method.push_instr(kind, TypeId::SelfType);
-        method.set_params(params.iter().map(|f| (f.id, f.ty)));
-        method.set_attrs(class_attrs.iter().map(|(k, ty)| (*k, *ty)));
-        self.globals.push(Some(GlobalValue::Method(method)));
+        function.push_instr(kind, TypeId::SelfType);
+        function.set_params(params.iter().map(|f| (f.id, f.ty)));
+        function.set_attrs(class_attrs.iter().map(|(k, ty)| (*k, *ty)));
+        self.globals.push(Some(GlobalValue::Function(function)));
 
         let (body, ty) = self.build_expr(typed_method.take_body());
         let kind = InstrKind::Return(Value::Id(body));
         self.push_instr(kind, ty);
 
-        self.end_method()
+        self.end_function()
     }
 
     fn build_maybe_cast(&mut self, ty: TypeId, expr: IrId, expr_ty: TypeId) -> Option<IrId> {
@@ -546,14 +546,14 @@ impl<'a> IrBuilder<'a> {
 
                 let tmp2 = self.new_tmp();
                 let tmp1 = Value::Id(tmp1);
-                let method_id = self
+                let function_id = self
                     .globals_map
                     .get(&(ty, "new"))
                     .map(|&id| IrId::Global(id))
                     .unwrap();
                 let kind = InstrKind::AssignCall(
                     tmp2,
-                    method_id,
+                    function_id,
                     Box::new([(TypeId::INT.size_of(), tmp1)]),
                 );
                 self.push_instr(kind, ty);
@@ -712,13 +712,13 @@ impl<'a> IrBuilder<'a> {
         args: Box<[TypedExpr<'a>]>,
         ty: TypeId,
     ) -> (IrId, TypeId) {
-        let method_params = self
+        let function_params = self
             .env
             .get_method(self.cur_class, method_name)
             .unwrap()
             .params()
             .to_vec();
-        let mut args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, function_params);
 
         let tmp1 = self.new_tmp();
         let kind = InstrKind::AssignLoad {
@@ -781,14 +781,14 @@ impl<'a> IrBuilder<'a> {
     ) -> (IrId, TypeId) {
         let expr_ty = expr.ty;
 
-        let method_params = self
+        let function_params = self
             .env
             .get_method(expr_ty, method_name)
             .unwrap()
             .params()
             .to_vec();
 
-        let mut args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, function_params);
 
         let (expr, _) = self.build_expr(expr);
         args[0] = (expr_ty.size_of(), Value::Id(expr));
@@ -828,25 +828,25 @@ impl<'a> IrBuilder<'a> {
         args: Box<[TypedExpr<'a>]>,
         result_ty: TypeId,
     ) -> (IrId, TypeId) {
-        let method_params = self
+        let function_params = self
             .env
             .get_method(ty, method_name)
             .unwrap()
             .params()
             .to_vec();
 
-        let mut args = self.build_args(args, method_params);
+        let mut args = self.build_args(args, function_params);
 
         let (expr, _) = self.build_expr(expr);
         args[0] = (ty.size_of(), Value::Id(expr));
 
         let tmp = self.new_tmp();
-        let method_id = self
+        let funciton_id = self
             .globals_map
             .get(&(ty, method_name))
             .map(|&id| IrId::Global(id))
             .unwrap();
-        let kind = InstrKind::AssignCall(tmp, method_id, args.into_boxed_slice());
+        let kind = InstrKind::AssignCall(tmp, funciton_id, args.into_boxed_slice());
         self.push_instr(kind, result_ty);
 
         (tmp, result_ty)

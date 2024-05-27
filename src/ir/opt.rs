@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     slice::IterMut,
 };
 
@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    block::{Block, BlockId},
-    builder::{GlobalValue, IrBuilder, MethodBuilder},
+    block::BlockId,
+    builder::{FunctionBuilder, GlobalValue, IrBuilder},
     Instr, InstrKind, IrId, LocalId, Value,
 };
 
@@ -45,55 +45,17 @@ impl Key for InstrId {
     }
 }
 
-pub struct MethodOptmizer {
+pub struct Function {
     instrs: IndexVec<InstrId, Instr>,
     blocks: IndexVec<BlockId, (InstrId, InstrId, BlockId)>,
-    locals: IndexVec<LocalId, (TypeId, BlockId)>,
-    idoms:  ImmediateDominators,
 }
 
-impl MethodOptmizer {
-    pub fn from_builder(mut builder: MethodBuilder) -> Self {
-        builder.set_labels();
-
-        let mut instrs = IndexVec::new();
-        let mut blocks = IndexVec::with_capacity(builder.blocks.len());
-        let mut idoms = IndexVec::with_capacity(blocks.len());
-
-        for block in builder.blocks.into_inner() {
-            let start = instrs.len();
-            instrs.extend(block.instrs);
-            let end = instrs.len();
-            blocks.push((InstrId(start), InstrId(end), block.id));
-            idoms.push(block.idom.unwrap_or(BlockId::ENTRY));
-        }
-
-        Self {
-            instrs,
-            blocks,
-            idoms,
-            locals: builder.locals,
-        }
-    }
-
-    fn block_ids(&self) -> impl Iterator<Item = BlockId> {
-        self.blocks.indices()
-    }
-
-    fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr> {
-        self.instrs.inner_mut().iter_mut()
-    }
-
-    pub fn optimize(&mut self) {
-        let preds = self.predecessors();
-        let dom_tree = self.dom_tree(&self.idoms);
-
-        let dom_frontiers = self.dom_frontiers(&preds, &self.idoms);
-        let phis = self.phi_positions(&preds, &dom_frontiers);
-
-        self.mem2reg(&preds, &dom_tree, phis);
-
-        while self.const_propagation() | self.dead_code_elimination() {}
+impl Function {
+    pub fn new(
+        instrs: IndexVec<InstrId, Instr>,
+        blocks: IndexVec<BlockId, (InstrId, InstrId, BlockId)>,
+    ) -> Self {
+        Self { instrs, blocks }
     }
 
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
@@ -119,31 +81,114 @@ impl MethodOptmizer {
     fn successors_instrs_visit<F: FnMut((BlockId, IterMut<Instr>))>(
         &mut self,
         block: BlockId,
-        f: &mut F,
+        mut f: F,
     ) {
         let (_, block_end, _) = &self.blocks[block];
         let block_end = block_end.prev();
 
         match self.instrs[block_end].kind {
             InstrKind::Jmp(target) => {
-                let (start, end, _) = &self.blocks[target];
-                f((target, self.instrs[*start..*end].iter_mut()));
+                f((target, self.instrs_block_mut(target).iter_mut()));
             }
             InstrKind::JmpCond {
                 on_true, on_false, ..
             } => {
-                let (start, end, _) = &self.blocks[on_true];
-                f((on_true, self.instrs[*start..*end].iter_mut()));
-                let (start, end, _) = &self.blocks[on_false];
-                f((on_false, self.instrs[*start..*end].iter_mut()));
+                f((on_true, self.instrs_block_mut(on_true).iter_mut()));
+                f((on_false, self.instrs_block_mut(on_false).iter_mut()));
             }
             InstrKind::Return(_) => {}
             _ => unreachable!(),
         }
     }
 
+    fn instrs_block(&self, block: BlockId) -> &[Instr] {
+        let (start, end, _) = self.blocks[block];
+        &self.instrs[start..end]
+    }
+
+    fn instrs_block_mut(&mut self, block: BlockId) -> &mut [Instr] {
+        let (start, end, _) = self.blocks[block];
+        &mut self.instrs[start..end]
+    }
+}
+
+pub struct FunctionOptmizer {
+    function: Function,
+    locals:   IndexVec<LocalId, (TypeId, BlockId)>,
+    idoms:    ImmediateDominators,
+    dom_tree: DominatorTree,
+}
+
+impl FunctionOptmizer {
+    pub fn from_builder(mut builder: FunctionBuilder) -> Self {
+        builder.set_labels();
+
+        let mut instrs = IndexVec::new();
+        let mut blocks = IndexVec::with_capacity(builder.blocks.len());
+        let mut idoms = IndexVec::with_capacity(blocks.len());
+        let mut dom_tree = IndexVec::with_capacity(blocks.len());
+
+        for block in builder.blocks.into_inner() {
+            let start = instrs.len();
+            instrs.extend(block.instrs);
+            let end = instrs.len();
+            blocks.push((InstrId(start), InstrId(end), block.id));
+            idoms.push(block.idom.unwrap_or(BlockId::ENTRY));
+            dom_tree.push(block.doms);
+        }
+
+        Self {
+            function: Function { instrs, blocks },
+            idoms,
+            dom_tree,
+            locals: builder.locals,
+        }
+    }
+
+    fn block_ids(&self) -> impl Iterator<Item = BlockId> {
+        self.function.blocks.indices()
+    }
+
+    fn blocks(&self) -> &IndexVec<BlockId, (InstrId, InstrId, BlockId)> {
+        &self.function.blocks
+    }
+
+    fn blocks_mut(&mut self) -> &mut IndexVec<BlockId, (InstrId, InstrId, BlockId)> {
+        &mut self.function.blocks
+    }
+
+    fn instrs_mut(&mut self) -> &mut IndexVec<InstrId, Instr> {
+        &mut self.function.instrs
+    }
+
+    fn instrs(&self) -> &IndexVec<InstrId, Instr> {
+        &self.function.instrs
+    }
+
+    fn instrs_block(&self, block: BlockId) -> &[Instr] {
+        self.function.instrs_block(block)
+    }
+
+    fn blocks_count(&self) -> usize {
+        self.function.blocks.len()
+    }
+
+    pub fn optimize(&mut self) {
+        let preds = self.predecessors();
+        let dom_frontiers = self.dominance_frontiers(&preds);
+        let phis = self.phi_positions(&preds, &dom_frontiers);
+
+        self.mem2reg(&preds, phis);
+
+        while self.const_propagation() | self.dead_code_elimination() {}
+    }
+
+    fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, f: F) {
+        self.function.successors_visit(block, f)
+    }
+
     fn predecessors(&self) -> Predecessors {
-        let mut preds = index_vec![vec![]; self.blocks.len()];
+        let mut preds = index_vec![vec![]; self.blocks_count()];
 
         for bb in self.block_ids() {
             self.successors_visit(bb, |succ| preds[succ].push(bb));
@@ -153,7 +198,7 @@ impl MethodOptmizer {
     }
 
     fn reachability_blocks(&self) -> IndexVec<BlockId, bool> {
-        let mut visited = index_vec![false; self.blocks.len()];
+        let mut visited = index_vec![false; self.blocks_count()];
         let mut stack = vec![BlockId::ENTRY];
 
         while let Some(block) = stack.pop() {
@@ -169,16 +214,16 @@ impl MethodOptmizer {
     }
 
     fn remove_dead_blocks(&mut self) -> bool {
-        let mut new_blocks = index_vec![None; self.blocks.len()];
+        let mut new_blocks = index_vec![None; self.blocks_count()];
         let mut reachable = self.reachability_blocks().into_iter().map(|(_, v)| v);
 
-        let len = self.blocks.len();
-        self.blocks.retain(|_| reachable.next().unwrap());
+        let len = self.blocks_count();
+        self.blocks_mut().retain(|_| reachable.next().unwrap());
 
-        let removed = len != self.blocks.len();
+        let removed = len != self.blocks_count();
 
         if removed {
-            for (id, (_, _, block)) in self.blocks.iter_mut() {
+            for (id, (_, _, block)) in self.blocks_mut() {
                 new_blocks[*block] = Some(id);
                 *block = id;
             }
@@ -191,7 +236,7 @@ impl MethodOptmizer {
 
     fn remove_unecessary_phis(&mut self, undeclared_vars: &HashSet<IrId>) -> bool {
         let mut changed = false;
-        for instr in self.instrs_mut() {
+        for (_, instr) in self.instrs_mut() {
             if let InstrKind::Phi(ref id, ref mut vals) = instr.kind {
                 vals.retain(|(val, _)| match val {
                     Value::Id(id) if undeclared_vars.contains(id) => {
@@ -213,7 +258,7 @@ impl MethodOptmizer {
 
     fn rename_blocks(&mut self, new_blocks: &IndexVec<BlockId, Option<BlockId>>) {
         let mut remove = false;
-        for instr in self.instrs_mut() {
+        for (_, instr) in self.instrs_mut() {
             if remove {
                 match instr.kind {
                     InstrKind::Label(_) => remove = false,
@@ -259,35 +304,37 @@ impl MethodOptmizer {
         }
     }
 
-    fn idoms(&self, doms: &Dominated) -> ImmediateDominators {
-        let mut idoms = index_vec![BlockId::ENTRY; self.blocks.len()];
+    pub fn dominators(&self, doms: &Dominated) -> (ImmediateDominators, DominatorTree) {
+        let mut idoms = index_vec![BlockId::ENTRY; self.blocks_count()];
+        let mut dom_tree = index_vec![vec![]; self.blocks_count()];
 
-        for block in self.block_ids().skip(1) {
-            for dom in doms[block]
+        for dom in self.block_ids().skip(1) {
+            for block in doms[dom]
                 .iter()
-                .filter_map(|&dom| if dom != block { Some(dom) } else { None })
+                .filter_map(|&d| if d != dom { Some(d) } else { None })
             {
                 if self.block_ids().all(|other| {
-                    if other == dom || other == block || !doms[other].contains(&dom) {
+                    if other == block || other == dom || !doms[other].contains(&block) {
                         true
                     } else {
-                        doms[other].contains(&block)
+                        doms[other].contains(&dom)
                     }
                 }) {
-                    idoms[dom] = block;
+                    idoms[block] = dom;
+                    dom_tree[dom].push(block);
                 }
             }
         }
 
-        idoms
+        (idoms, dom_tree)
     }
 
-    fn dominated_blocks(&self) -> Dominated {
-        let mut dom_tree = IndexVec::with_capacity(self.blocks.len());
+    pub fn dominated_blocks(&self) -> Dominated {
+        let mut dom_tree = IndexVec::with_capacity(self.blocks_count());
         dom_tree.push(self.block_ids().collect::<Vec<_>>());
 
         for block in self.block_ids().skip(1) {
-            let mut visited = index_vec![false; self.blocks.len()];
+            let mut visited = index_vec![false; self.blocks_count()];
             visited[BlockId::ENTRY] = true;
 
             let mut work_list = vec![BlockId::ENTRY];
@@ -311,41 +358,20 @@ impl MethodOptmizer {
         dom_tree
     }
 
-    fn dom_tree(&self, idoms: &ImmediateDominators) -> DominatorTree {
-        let mut dom_tree = index_vec![vec![]; self.blocks.len()];
-
-        for bb in self.block_ids().skip(1) {
-            let idom = idoms[bb];
-            dom_tree[idom].push(bb);
-        }
-
-        dom_tree
-    }
-
-    fn dom_frontiers(
-        &self,
-        preds: &Predecessors,
-        idoms: &ImmediateDominators,
-    ) -> DominanceFrontiers {
-        let mut frontiers = index_vec![vec![]; self.blocks.len()];
+    fn dominance_frontiers(&self, preds: &Predecessors) -> DominanceFrontiers {
+        let mut frontiers = index_vec![vec![]; self.blocks_count()];
 
         for bb in self.block_ids().filter(|b| preds[*b].len() >= 2) {
-            let Some(idom) = idoms.get(bb).copied() else {
-                continue;
-            };
+            let idom = self.idoms[bb];
 
-            for pred in preds[bb]
-                .iter()
-                .copied()
-                .filter(|&pred| pred.is_entry() || pred != idoms[pred])
-            {
-                let mut at = pred;
-                while at != idom {
-                    let df = &mut frontiers[at];
+            for pred in preds[bb].iter().copied() {
+                let mut runner = pred;
+                while runner != idom {
+                    let df = &mut frontiers[runner];
                     if !df.contains(&bb) {
                         df.push(bb);
                     }
-                    at = idoms[at];
+                    runner = self.idoms[runner];
                 }
             }
         }
@@ -360,8 +386,8 @@ impl MethodOptmizer {
             stores.push((local_block, vec![]));
         }
 
-        for (block_id, (start, end, _)) in self.blocks.iter() {
-            for instr in self.instrs[*start..*end].iter() {
+        for block_id in self.block_ids() {
+            for instr in self.instrs_block(block_id) {
                 if let InstrKind::Store(local, _, _) = instr.kind {
                     stores[local.local_id().unwrap()].1.push(block_id);
                 }
@@ -374,8 +400,8 @@ impl MethodOptmizer {
     fn all_locals_uses(&self) -> IndexVec<LocalId, (BlockId, Vec<BlockId>)> {
         let mut uses = index_vec![(BlockId::ENTRY, vec![]); self.locals.len()];
 
-        for (block_id, (start, end, _)) in self.blocks.iter() {
-            for instr in self.instrs[*start..*end].iter() {
+        for block_id in self.block_ids() {
+            for instr in self.instrs_block(block_id) {
                 let (decl, used) = instr.kind.uses();
                 if let Some(decl) = decl.and_then(|id| id.local_id()) {
                     uses[decl].0 = block_id;
@@ -394,7 +420,7 @@ impl MethodOptmizer {
     fn all_uses(&self) -> HashMap<IrId, (InstrId, Vec<InstrId>)> {
         let mut uses = HashMap::new();
 
-        for (id, instr) in self.instrs.iter() {
+        for (id, instr) in self.instrs() {
             let (decl, used) = instr.kind.uses();
             if let Some(decl) = decl {
                 uses.entry(decl).or_insert((id, vec![])).0 = id;
@@ -417,9 +443,9 @@ impl MethodOptmizer {
         IndexVec<BlockId, Vec<LocalId>>,
     ) {
         let uses = self.all_locals_uses();
-        let mut live_out = index_vec![Vec::new(); self.blocks.len()];
-        let mut live_in = index_vec![Vec::new(); self.blocks.len()];
-        let mut visited = index_vec![index_vec![false; self.locals.len()]; self.blocks.len()];
+        let mut live_out = index_vec![Vec::new(); self.blocks_count()];
+        let mut live_in = index_vec![Vec::new(); self.blocks_count()];
+        let mut visited = index_vec![index_vec![false; self.locals.len()]; self.blocks_count()];
 
         for (local, (decl_block, mut blocks)) in uses.into_iter() {
             while let Some(block) = blocks.pop() {
@@ -445,7 +471,7 @@ impl MethodOptmizer {
         preds: &Predecessors,
         dom_frontiers: &DominanceFrontiers,
     ) -> PhiPositions {
-        let mut phi_positions: PhiPositions = index_vec![vec![]; self.blocks.len()];
+        let mut phi_positions: PhiPositions = index_vec![vec![]; self.blocks_count()];
         let (live_in, _) = self.local_liveness_check(preds);
         let stores = self.all_stores();
 
@@ -475,9 +501,9 @@ impl MethodOptmizer {
         phi_positions
     }
 
-    fn rename_ids(&mut self, preds: &Predecessors, dom_tree: &DominatorTree) {
+    fn rename_ids(&mut self, preds: &Predecessors) {
         fn rename(
-            method: &mut MethodOptmizer,
+            function: &mut Function,
             block: BlockId,
             renames: &mut HashMap<IrId, IrId>,
             cur_tmp: &mut IrId,
@@ -486,12 +512,11 @@ impl MethodOptmizer {
         ) {
             let cur = renames.clone();
 
-            let (start, end, _) = &method.blocks[block];
-            for instr in method.instrs[*start..*end].iter_mut() {
+            for instr in function.instrs_block_mut(block) {
                 instr.kind.rename(renames, cur_tmp);
             }
 
-            method.successors_instrs_visit(block, &mut |(s, i)| {
+            function.successors_instrs_visit(block, |(s, i)| {
                 let j = preds[s].iter().position(|&p| p == block).unwrap();
                 for args in i.filter_map(|instr| match instr.kind {
                     InstrKind::Phi(_, ref mut args) => Some(args),
@@ -505,7 +530,7 @@ impl MethodOptmizer {
             });
 
             for child in dom_tree[block].iter().copied() {
-                rename(method, child, renames, cur_tmp, preds, dom_tree);
+                rename(function, child, renames, cur_tmp, preds, dom_tree);
             }
 
             *renames = cur;
@@ -515,12 +540,12 @@ impl MethodOptmizer {
         let mut cur_tmp = IrId::Renamed(0);
 
         rename(
-            self,
+            &mut self.function,
             BlockId::ENTRY,
             &mut renames,
             &mut cur_tmp,
             preds,
-            dom_tree,
+            &self.dom_tree,
         );
     }
 
@@ -535,11 +560,12 @@ impl MethodOptmizer {
                         .collect(),
                 );
                 let instr = Instr::new(kind, ty);
-                let (start, end, _) = &mut self.blocks[block];
-                self.instrs.insert(start.next(), instr);
+                let (start, _, _) = self.blocks()[block];
+                self.instrs_mut().insert(start.next(), instr);
+                let (_, end, _) = &mut self.blocks_mut()[block];
                 *end = end.next();
 
-                for block in self.blocks[block..].iter_mut().skip(1) {
+                for block in self.blocks_mut()[block..].iter_mut().skip(1) {
                     block.0 = block.0.next();
                     block.1 = block.1.next();
                 }
@@ -547,9 +573,9 @@ impl MethodOptmizer {
         }
     }
 
-    fn mem2reg(&mut self, preds: &Predecessors, dom_tree: &DominatorTree, phis: PhiPositions) {
+    fn mem2reg(&mut self, preds: &Predecessors, phis: PhiPositions) {
         self.insert_phis(phis);
-        self.rename_ids(preds, dom_tree);
+        self.rename_ids(preds);
     }
 
     fn dead_code_elimination(&mut self) -> bool {
@@ -558,7 +584,11 @@ impl MethodOptmizer {
         // contains the (use_count, decl_ref, variables_used_in_decl)
         let mut counter = HashMap::new();
 
-        for instr in self.instrs_mut().map(|instr| &mut instr.kind) {
+        for instr in self
+            .instrs_mut()
+            .into_iter()
+            .map(|(_, instr)| &mut instr.kind)
+        {
             let (decl, used) = instr.uses();
             if let Some(used) = used.as_ref() {
                 for u in used.iter() {
@@ -576,7 +606,7 @@ impl MethodOptmizer {
         }
 
         while let Some(id) = counter.iter().find_map(|(id, (use_count, i, _))| {
-            if *use_count == 0 && !i.as_ref().unwrap().is_method() {
+            if *use_count == 0 && !i.as_ref().unwrap().is_function() {
                 Some(*id)
             } else {
                 None
@@ -608,12 +638,14 @@ impl MethodOptmizer {
 
     fn const_propagation(&mut self) -> bool {
         let mut values = HashMap::new();
-        let mut work_list = (0..self.instrs.len()).map(InstrId).collect::<VecDeque<_>>();
+        let mut work_list = (0..self.instrs().len())
+            .map(InstrId)
+            .collect::<VecDeque<_>>();
         let mut changed = false;
         let uses = self.all_uses();
 
         while let Some(id) = work_list.pop_front() {
-            let instr = &mut self.instrs[id];
+            let instr = &mut self.instrs_mut()[id];
             if let Some(used) = instr.kind.const_fold(&mut values, &uses) {
                 changed = true;
                 work_list.extend(used);
@@ -628,7 +660,7 @@ impl InstrKind {
     pub fn rename(&mut self, renames: &mut HashMap<IrId, IrId>, tmp: &mut IrId) -> bool {
         match self {
             Self::Nop
-            | Self::Method { .. }
+            | Self::Function { .. }
             | Self::Vtable(_, _)
             | Self::Label(_)
             | Self::Jmp(_) => {}
@@ -642,6 +674,7 @@ impl InstrKind {
                 let cur_id = renames.get(id).unwrap();
                 *id = *cur_id;
             }
+
             Self::Return(val) => {
                 if let Value::Id(id) = val {
                     let cur_id = renames.get(id).unwrap();
@@ -984,40 +1017,42 @@ impl InstrKind {
 }
 
 pub struct IrOptmizer {
-    methods: Vec<MethodOptmizer>,
-    vtables: Vec<InstrKind>,
+    functions: Vec<FunctionOptmizer>,
+    vtables:   Vec<InstrKind>,
 }
 
 impl IrOptmizer {
     pub fn from_builder(builder: IrBuilder) -> Self {
-        let mut methods = vec![];
+        let mut functions = vec![];
         let mut vtables = vec![];
 
         for global in builder.globals.into_iter().filter_map(|(_, val)| val) {
             match global {
                 GlobalValue::Vtable(kind) => vtables.push(kind),
-                GlobalValue::Method(method) => methods.push(MethodOptmizer::from_builder(method)),
+                GlobalValue::Function(function) => {
+                    functions.push(FunctionOptmizer::from_builder(function))
+                }
             }
         }
 
-        Self { methods, vtables }
+        Self { functions, vtables }
     }
 
-    pub fn methods_mut(&mut self) -> impl Iterator<Item = &mut MethodOptmizer> {
-        self.methods.iter_mut()
+    pub fn functions_mut(&mut self) -> impl Iterator<Item = &mut FunctionOptmizer> {
+        self.functions.iter_mut()
     }
 
     pub fn optimize(&mut self) {
-        for method in self.methods.iter_mut() {
-            method.optimize();
+        for function in self.functions.iter_mut() {
+            function.optimize();
         }
     }
 
     fn instrs_with_nops(&self) -> impl Iterator<Item = &InstrKind> {
         self.vtables.iter().chain(
-            self.methods
+            self.functions
                 .iter()
-                .flat_map(|m| m.instrs.inner().iter().map(|i| &i.kind)),
+                .flat_map(|m| m.instrs().inner().iter().map(|i| &i.kind)),
         )
     }
 

@@ -36,7 +36,7 @@ pub struct Block {
     pub id:     BlockId,
     pub idom:   Option<BlockId>,
     pub instrs: VecDeque<Instr>,
-    pub sdoms:  Vec<BlockId>,
+    pub doms:   Vec<BlockId>,
 }
 
 impl Block {
@@ -45,7 +45,7 @@ impl Block {
             id,
             idom: None,
             instrs: VecDeque::new(),
-            sdoms: vec![],
+            doms: vec![],
         }
     }
 

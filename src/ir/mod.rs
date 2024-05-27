@@ -3,7 +3,6 @@ use std::{fmt, rc::Rc};
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::Key,
-    span::Span,
     types::TypeId,
 };
 
@@ -39,7 +38,7 @@ pub enum InstrKind {
     Nop,
 
     Vtable(GlobalId, Box<[GlobalId]>),
-    Method {
+    Function {
         id:    IrId,
         ret:   usize,
         arity: usize,
@@ -90,8 +89,8 @@ impl InstrKind {
         matches!(self, Self::Return(_) | Self::Jmp(_) | Self::JmpCond { .. })
     }
 
-    pub fn is_method(&self) -> bool {
-        matches!(self, Self::AssignCall(_, _, _) | Self::Method { .. })
+    pub fn is_function(&self) -> bool {
+        matches!(self, Self::AssignCall(_, _, _) | Self::Function { .. })
     }
 
     pub fn is_nop(&self) -> bool {
@@ -102,7 +101,7 @@ impl InstrKind {
         match self {
             Self::Nop | Self::Label(_) | Self::Jmp(_) => (None, None),
 
-            Self::Method { id, .. }
+            Self::Function { id, .. }
             | Self::Param(_, id)
             | Self::Local(_, id)
             | Self::Attr(_, id) => (Some(*id), None),
@@ -202,8 +201,8 @@ impl fmt::Display for InstrKind {
                 }
                 write!(f, "]")
             }
-            InstrKind::Method { id, ret, arity } => {
-                write!(f, "method {} {}, {} {{", ret, id, arity)
+            InstrKind::Function { id, ret, arity } => {
+                write!(f, "function {} {}, {} {{", ret, id, arity)
             }
             InstrKind::Param(ty, id) => write!(f, "    param {} {}", ty, id),
             InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),

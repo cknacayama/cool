@@ -168,8 +168,8 @@ impl Config {
                 for typed in typed {
                     ir_builder.build_class(typed);
                 }
-                for method in ir_builder.methods_mut() {
-                    method.set_labels();
+                for function in ir_builder.functions_mut() {
+                    function.set_labels();
                 }
                 let mut output = String::new();
                 for ir in ir_builder.instrs() {
