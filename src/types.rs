@@ -1,11 +1,8 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    num::NonZeroU32,
-};
+use std::{cmp::Ordering, num::NonZeroU32};
 
 use crate::{
     ast::Class,
+    fxhash::{FxHashMap, FxHashSet},
     index_vec::{self, index_vec, IndexVec, Key},
     span::Span,
 };
@@ -105,9 +102,9 @@ pub enum Type<'a> {
     Class(&'a str),
 }
 
-const IO_CLASS: Type<'static> = Type::Class("IO");
-
 impl<'a> Type<'a> {
+    const IO_CLASS: Type<'static> = Type::Class("IO");
+
     pub fn to_str(&self) -> &'a str {
         match self {
             Type::Object => "Object",
@@ -140,7 +137,7 @@ impl<'a> Type<'a> {
     }
 
     pub fn is_io(&self) -> bool {
-        matches!(self, &IO_CLASS)
+        matches!(self, &Type::IO_CLASS)
     }
 
     pub fn is_inheritable(&self) -> bool {
@@ -371,8 +368,8 @@ impl<'a> MethodTypeData<'a> {
 pub struct ClassTypeData<'a> {
     id:      &'a str,
     parent:  Option<TypeId>,
-    attrs:   HashMap<&'a str, TypeId>,
-    methods: HashMap<&'a str, MethodTypeData<'a>>,
+    attrs:   FxHashMap<&'a str, TypeId>,
+    methods: FxHashMap<&'a str, MethodTypeData<'a>>,
     vtable:  Vec<(TypeId, &'a str)>,
 }
 
@@ -380,8 +377,8 @@ impl<'a> ClassTypeData<'a> {
     pub fn new(
         id: &'a str,
         parent: Option<TypeId>,
-        attrs: HashMap<&'a str, TypeId>,
-        methods: HashMap<&'a str, MethodTypeData<'a>>,
+        attrs: FxHashMap<&'a str, TypeId>,
+        methods: FxHashMap<&'a str, MethodTypeData<'a>>,
         vtable: Vec<(TypeId, &'a str)>,
     ) -> Result<Self, TypeErrorKind<'static>> {
         match parent {
@@ -407,11 +404,11 @@ impl<'a> ClassTypeData<'a> {
         self.parent
     }
 
-    pub fn attrs(&self) -> &HashMap<&'a str, TypeId> {
+    pub fn attrs(&self) -> &FxHashMap<&'a str, TypeId> {
         &self.attrs
     }
 
-    pub fn methods(&self) -> &HashMap<&'a str, MethodTypeData<'a>> {
+    pub fn methods(&self) -> &FxHashMap<&'a str, MethodTypeData<'a>> {
         &self.methods
     }
 
@@ -432,7 +429,7 @@ impl<'a> ClassTypeData<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectEnv<'a> {
-    objects: HashMap<&'a str, TypeId>,
+    objects: FxHashMap<&'a str, TypeId>,
 }
 
 impl<'a> Default for ObjectEnv<'a> {
@@ -444,7 +441,7 @@ impl<'a> Default for ObjectEnv<'a> {
 impl<'a> ObjectEnv<'a> {
     pub fn new() -> Self {
         Self {
-            objects: HashMap::new(),
+            objects: FxHashMap::default(),
         }
     }
 
@@ -459,7 +456,7 @@ impl<'a> ObjectEnv<'a> {
 
 #[derive(Debug)]
 pub struct ClassEnv<'a> {
-    types:   HashMap<Type<'a>, TypeId>,
+    types:   FxHashMap<Type<'a>, TypeId>,
     classes: IndexVec<TypeId, ClassTypeData<'a>>,
 }
 
@@ -474,10 +471,15 @@ impl<'a> ClassEnv<'a> {
     pub fn new() -> Self {
         let mut classes = IndexVec::with_capacity(5);
 
-        macro_rules! builtin_method {
-            ($id:literal, [ $($param:expr),* ], $return_ty:expr) => {
-                ($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty))
+        macro_rules! builtin_method_map {
+            () => {
+                FxHashMap::default()
             };
+            ($(($id:literal, [ $($param:expr),* ], $return_ty:expr)),+ $(,)?) => {{
+                let mut map = FxHashMap::default();
+                $(map.insert($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty));)*
+                map
+            }};
         }
 
         macro_rules! builtin_vtable {
@@ -489,65 +491,65 @@ impl<'a> ClassEnv<'a> {
         let object = ClassTypeData::new(
             "Object",
             None,
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("abort", [], TypeId::OBJECT),
-                builtin_method!("type_name", [], TypeId::STRING),
-                builtin_method!("copy", [], TypeId::SelfType),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map![
+                ("abort", [], TypeId::OBJECT),
+                ("type_name", [], TypeId::STRING),
+                ("copy", [], TypeId::SelfType),
+            ],
             builtin_vtable!(TypeId::OBJECT, []),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
             "Bool",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             builtin_vtable!(TypeId::BOOL, []),
         )
         .unwrap();
         let int = ClassTypeData::new(
             "Int",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             builtin_vtable!(TypeId::INT, []),
         )
         .unwrap();
         let string = ClassTypeData::new(
             "String",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("length", [], TypeId::INT),
-                builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
-                builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map![
+                ("length", [], TypeId::INT),
+                ("concat", [TypeId::STRING], TypeId::STRING),
+                ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
+            ],
             builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
             "IO",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("out_string", [TypeId::STRING], TypeId::SelfType),
-                builtin_method!("out_int", [TypeId::INT], TypeId::SelfType),
-                builtin_method!("in_string", [], TypeId::STRING),
-                builtin_method!("in_int", [], TypeId::INT),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map!(
+                ("out_string", [TypeId::STRING], TypeId::SelfType),
+                ("out_int", [TypeId::INT], TypeId::SelfType),
+                ("in_string", [], TypeId::STRING),
+                ("in_int", [], TypeId::INT),
+            ),
             builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
 
-        let types = HashMap::from([
-            (Type::Object, TypeId::OBJECT),
-            (Type::Int, TypeId::INT),
-            (Type::Bool, TypeId::BOOL),
-            (Type::String, TypeId::STRING),
-            (Type::SelfType, TypeId::SelfType),
-            (IO_CLASS, TypeId::IO),
-        ]);
+        let mut types = FxHashMap::default();
+
+        types.insert(Type::Object, TypeId::OBJECT);
+        types.insert(Type::Int, TypeId::INT);
+        types.insert(Type::Bool, TypeId::BOOL);
+        types.insert(Type::String, TypeId::STRING);
+        types.insert(Type::SelfType, TypeId::SelfType);
+        types.insert(Type::IO_CLASS, TypeId::IO);
 
         classes.push(object);
         classes.push(int);
@@ -555,7 +557,7 @@ impl<'a> ClassEnv<'a> {
         classes.push(string);
         classes.push(io);
 
-        assert_eq!(classes.len(), types.len() - 1);
+        debug_assert_eq!(classes.len(), types.len() - 1);
 
         Self { types, classes }
     }
@@ -564,10 +566,15 @@ impl<'a> ClassEnv<'a> {
         let mut classes = IndexVec::with_capacity(ienv.classes.len());
         let types = ienv.types;
 
-        macro_rules! builtin_method {
-            ($id:literal, [ $($param:expr),* ], $return_ty:expr) => {
-                ($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty))
+        macro_rules! builtin_method_map {
+            () => {
+                FxHashMap::default()
             };
+            ($(($id:literal, [ $($param:expr),* ], $return_ty:expr)),+ $(,)?) => {{
+                let mut map = FxHashMap::default();
+                $(map.insert($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty));)*
+                map
+            }};
         }
 
         macro_rules! builtin_vtable {
@@ -579,53 +586,53 @@ impl<'a> ClassEnv<'a> {
         let object = ClassTypeData::new(
             "Object",
             None,
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("abort", [], TypeId::OBJECT),
-                builtin_method!("type_name", [], TypeId::STRING),
-                builtin_method!("copy", [], TypeId::SelfType),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map![
+                ("abort", [], TypeId::OBJECT),
+                ("type_name", [], TypeId::STRING),
+                ("copy", [], TypeId::SelfType),
+            ],
             builtin_vtable!(TypeId::OBJECT, []),
         )
         .unwrap();
         let bool_ = ClassTypeData::new(
             "Bool",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             builtin_vtable!(TypeId::BOOL, []),
         )
         .unwrap();
         let int = ClassTypeData::new(
             "Int",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             builtin_vtable!(TypeId::INT, []),
         )
         .unwrap();
         let string = ClassTypeData::new(
             "String",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("length", [], TypeId::INT),
-                builtin_method!("concat", [TypeId::STRING], TypeId::STRING),
-                builtin_method!("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map![
+                ("length", [], TypeId::INT),
+                ("concat", [TypeId::STRING], TypeId::STRING),
+                ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
+            ],
             builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
             "IO",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::from([
-                builtin_method!("out_string", [TypeId::STRING], TypeId::SelfType),
-                builtin_method!("out_int", [TypeId::INT], TypeId::SelfType),
-                builtin_method!("in_string", [], TypeId::STRING),
-                builtin_method!("in_int", [], TypeId::INT),
-            ]),
+            FxHashMap::default(),
+            builtin_method_map![
+                ("out_string", [TypeId::STRING], TypeId::SelfType),
+                ("out_int", [TypeId::INT], TypeId::SelfType),
+                ("in_string", [], TypeId::STRING),
+                ("in_int", [], TypeId::INT),
+            ],
             builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
@@ -831,7 +838,7 @@ impl<'a> ClassEnv<'a> {
             return Ok(lhs);
         }
 
-        let mut rhs_ancestors = HashSet::new();
+        let mut rhs_ancestors = FxHashSet::default();
 
         loop {
             let class = &self.classes[rhs];
@@ -900,7 +907,7 @@ impl<'a> IClassTypeData<'a> {
 /// Intermidiate class environment used during type checking.
 #[derive(Debug)]
 pub struct IClassEnv<'a> {
-    types:    HashMap<Type<'a>, TypeId>,
+    types:    FxHashMap<Type<'a>, TypeId>,
     classes:  IndexVec<TypeId, IClassTypeData<'a>>,
     children: IndexVec<TypeId, Vec<TypeId>>,
 }
@@ -922,17 +929,16 @@ impl<'a> IClassEnv<'a> {
             Vec::new(),
         ];
 
-        let types = HashMap::from([
-            (Type::Object, TypeId::OBJECT),
-            (Type::Int, TypeId::INT),
-            (Type::Bool, TypeId::BOOL),
-            (Type::String, TypeId::STRING),
-            (Type::SelfType, TypeId::SelfType),
-            (IO_CLASS, TypeId::IO),
-        ]);
+        let mut types = FxHashMap::default();
+        types.insert(Type::Object, TypeId::OBJECT);
+        types.insert(Type::Int, TypeId::INT);
+        types.insert(Type::Bool, TypeId::BOOL);
+        types.insert(Type::String, TypeId::STRING);
+        types.insert(Type::SelfType, TypeId::SelfType);
+        types.insert(Type::IO_CLASS, TypeId::IO);
 
-        assert_eq!(classes.len(), children.len());
-        assert_eq!(types.len() - 1, classes.len());
+        debug_assert_eq!(classes.len(), children.len());
+        debug_assert_eq!(types.len() - 1, classes.len());
 
         Self {
             types,
@@ -1076,30 +1082,48 @@ mod tests {
         let a_data = ClassTypeData::new(
             "A",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             vec![],
         )
         .unwrap();
         let b_data = ClassTypeData::new(
             "B",
             Some(TypeId::OBJECT),
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             vec![],
         )
         .unwrap();
         let a = env.insert_class(a, a_data).unwrap();
         let b = env.insert_class(b, b_data).unwrap();
 
-        let c_data =
-            ClassTypeData::new("C", Some(a), HashMap::new(), HashMap::new(), vec![]).unwrap();
+        let c_data = ClassTypeData::new(
+            "C",
+            Some(a),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            vec![],
+        )
+        .unwrap();
         let c = env.insert_class(c, c_data).unwrap();
 
-        let d_data =
-            ClassTypeData::new("D", Some(b), HashMap::new(), HashMap::new(), vec![]).unwrap();
-        let e_data =
-            ClassTypeData::new("E", Some(c), HashMap::new(), HashMap::new(), vec![]).unwrap();
+        let d_data = ClassTypeData::new(
+            "D",
+            Some(b),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            vec![],
+        )
+        .unwrap();
+        let e_data = ClassTypeData::new(
+            "E",
+            Some(c),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            vec![],
+        )
+        .unwrap();
         let d = env.insert_class(d, d_data).unwrap();
         let e = env.insert_class(e, e_data).unwrap();
 

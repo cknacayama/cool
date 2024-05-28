@@ -2,6 +2,7 @@ pub mod asm;
 pub mod ast;
 pub mod checker;
 pub mod cli;
+pub mod fxhash;
 pub mod index_vec;
 pub mod ir;
 pub mod lexer;

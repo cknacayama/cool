@@ -296,6 +296,20 @@ pub enum IrId {
     Global(GlobalId),
 }
 
+impl Key for IrId {
+    fn to_index(self) -> usize {
+        match self {
+            Self::Tmp(subs) | Self::Renamed(subs) => subs as usize,
+            Self::Local(LocalId(subs)) | Self::Ptr(LocalId(subs)) => subs as usize,
+            Self::Global(GlobalId(subs)) => subs as usize,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::Tmp(index as u32)
+    }
+}
+
 impl IrId {
     pub const LOCAL_SELF: Self = Self::Local(LocalId(0));
 

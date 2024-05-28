@@ -1,10 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::rc::Rc;
 
 use crate::{
     ast::{BinOp, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal, TypedMethod},
+    fxhash::{FxHashMap, FxHashSet},
     index_vec::{index_vec, IndexVec, Key},
     types::{ClassEnv, TypeId},
 };
@@ -18,7 +16,7 @@ use super::{
 pub struct FunctionBuilder<'a> {
     class:             TypeId,
     pub(super) blocks: IndexVec<BlockId, Block>,
-    cur_locals:        Vec<HashMap<&'a str, IrId>>,
+    cur_locals:        Vec<FxHashMap<&'a str, IrId>>,
     pub(super) locals: IndexVec<LocalId, (TypeId, BlockId)>,
     cur_tmp:           u32,
 }
@@ -99,15 +97,15 @@ impl<'a> FunctionBuilder<'a> {
         self.blocks[idom].doms.push(block);
     }
 
-    fn cur_scope_mut(&mut self) -> &mut HashMap<&'a str, IrId> {
+    fn cur_scope_mut(&mut self) -> &mut FxHashMap<&'a str, IrId> {
         self.cur_locals.last_mut().unwrap()
     }
 
     fn begin_scope(&mut self) {
-        self.cur_locals.push(HashMap::new())
+        self.cur_locals.push(FxHashMap::default())
     }
 
-    fn end_scope(&mut self) -> HashMap<&'a str, IrId> {
+    fn end_scope(&mut self) -> FxHashMap<&'a str, IrId> {
         self.cur_locals.pop().unwrap()
     }
 
@@ -264,14 +262,14 @@ pub enum GlobalValue<'a> {
 pub struct IrBuilder<'a> {
     cur_class:          TypeId,
     env:                ClassEnv<'a>,
-    globals_map:        HashMap<(TypeId, &'a str), GlobalId>,
+    globals_map:        FxHashMap<(TypeId, &'a str), GlobalId>,
     pub(super) globals: IndexVec<GlobalId, Option<GlobalValue<'a>>>,
-    strings:            HashSet<Rc<str>>,
+    strings:            FxHashSet<Rc<str>>,
 }
 
 impl<'a> IrBuilder<'a> {
     pub fn new(env: ClassEnv<'a>) -> Self {
-        let mut globals_map = HashMap::new();
+        let mut globals_map = FxHashMap::default();
         let mut globals = IndexVec::new();
 
         for (class, data) in env.classes() {
@@ -285,16 +283,19 @@ impl<'a> IrBuilder<'a> {
             IrBuilder::new_vtable(&mut globals_map, &mut globals, class, vtable);
         }
 
+        let mut strings = FxHashSet::default();
+        strings.insert(Rc::from(""));
+
         Self {
             cur_class: TypeId::SelfType,
             env,
             globals_map,
             globals,
-            strings: HashSet::from([Rc::from("")]),
+            strings,
         }
     }
 
-    pub fn strings(&self) -> &HashSet<Rc<str>> {
+    pub fn strings(&self) -> &FxHashSet<Rc<str>> {
         &self.strings
     }
 
@@ -364,11 +365,11 @@ impl<'a> IrBuilder<'a> {
         self.cur_function_mut().begin_scope()
     }
 
-    fn end_scope(&mut self) -> HashMap<&'a str, IrId> {
+    fn end_scope(&mut self) -> FxHashMap<&'a str, IrId> {
         self.cur_function_mut().end_scope()
     }
 
-    fn end_function(&mut self) -> HashMap<&'a str, IrId> {
+    fn end_function(&mut self) -> FxHashMap<&'a str, IrId> {
         self.end_scope()
     }
 
@@ -415,7 +416,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     fn new_vtable(
-        globals_map: &mut HashMap<(TypeId, &'a str), GlobalId>,
+        globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
         globals: &mut IndexVec<GlobalId, Option<GlobalValue<'a>>>,
         ty: TypeId,
         vtable: Box<[GlobalId]>,
@@ -429,7 +430,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     fn new_function(
-        globals_map: &mut HashMap<(TypeId, &'a str), GlobalId>,
+        globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
         globals: &mut IndexVec<GlobalId, Option<GlobalValue<'a>>>,
         ty: TypeId,
         name: &'a str,
@@ -484,7 +485,7 @@ impl<'a> IrBuilder<'a> {
         &mut self,
         typed_method: TypedMethod<'a>,
         class_attrs: &[(&'a str, TypeId, usize)],
-    ) -> HashMap<&'a str, IrId> {
+    ) -> FxHashMap<&'a str, IrId> {
         let id = typed_method.id();
 
         let params = typed_method.params();

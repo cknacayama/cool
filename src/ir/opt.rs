@@ -1,10 +1,8 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    slice::IterMut,
-};
+use std::{collections::VecDeque, slice::IterMut};
 
 use crate::{
     ast::{BinOp, UnOp},
+    fxhash::FxHashMap,
     index_vec::{index_vec, IndexVec, Key},
     types::TypeId,
 };
@@ -22,7 +20,7 @@ type Dominated = IndexVec<BlockId, Vec<BlockId>>;
 type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
 type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstrId(usize);
 
 impl InstrId {
@@ -45,12 +43,14 @@ impl Key for InstrId {
     }
 }
 
+#[derive(Debug)]
 pub struct BlockData {
     start: InstrId,
     end:   InstrId,
     id:    BlockId,
 }
 
+#[derive(Debug)]
 pub struct Function {
     instrs: IndexVec<InstrId, Instr>,
     blocks: IndexVec<BlockId, BlockData>,
@@ -115,6 +115,7 @@ impl Function {
     }
 }
 
+#[derive(Debug)]
 pub struct FunctionOptmizer {
     function: Function,
     locals:   IndexVec<LocalId, (TypeId, BlockId)>,
@@ -423,8 +424,8 @@ impl FunctionOptmizer {
         uses
     }
 
-    fn all_uses(&self) -> HashMap<IrId, (InstrId, Vec<InstrId>)> {
-        let mut uses = HashMap::new();
+    fn all_uses(&self) -> FxHashMap<IrId, (InstrId, Vec<InstrId>)> {
+        let mut uses = FxHashMap::default();
 
         for (id, instr) in self.instrs() {
             let (decl, used) = instr.kind.uses();
@@ -511,7 +512,7 @@ impl FunctionOptmizer {
         fn rename(
             function: &mut Function,
             block: BlockId,
-            renames: &mut HashMap<IrId, Vec<IrId>>,
+            renames: &mut FxHashMap<IrId, Vec<IrId>>,
             cur_tmp: &mut IrId,
             preds: &Predecessors,
             dom_tree: &DominatorTree,
@@ -545,7 +546,7 @@ impl FunctionOptmizer {
             }
         }
 
-        let mut renames = HashMap::new();
+        let mut renames = FxHashMap::default();
         let mut cur_tmp = IrId::Renamed(0);
 
         rename(
@@ -646,7 +647,7 @@ impl FunctionOptmizer {
         let mut res = self.remove_dead_blocks();
 
         // contains the (use_count, decl_ref, variables_used_in_decl)
-        let mut counter = HashMap::new();
+        let mut counter = FxHashMap::default();
 
         for instr in self
             .instrs_mut()
@@ -692,7 +693,7 @@ impl FunctionOptmizer {
     }
 
     fn const_propagation(&mut self) -> bool {
-        let mut values = HashMap::new();
+        let mut values = FxHashMap::default();
         let mut work_list = (0..self.instrs().len())
             .map(InstrId)
             .collect::<VecDeque<_>>();
@@ -714,7 +715,7 @@ impl FunctionOptmizer {
 impl InstrKind {
     pub fn rename(
         &mut self,
-        renames: &mut HashMap<IrId, Vec<IrId>>,
+        renames: &mut FxHashMap<IrId, Vec<IrId>>,
         tmp: &mut IrId,
     ) -> Option<IrId> {
         match self {
@@ -895,8 +896,8 @@ impl InstrKind {
 
     fn const_fold<'b>(
         &'b mut self,
-        values: &mut HashMap<IrId, Value>,
-        uses: &'b HashMap<IrId, (InstrId, Vec<InstrId>)>,
+        values: &mut FxHashMap<IrId, Value>,
+        uses: &'b FxHashMap<IrId, (InstrId, Vec<InstrId>)>,
     ) -> Option<impl Iterator<Item = InstrId> + '_> {
         match self {
             InstrKind::Assign(id, val) => {
@@ -977,7 +978,7 @@ impl InstrKind {
         }
     }
 
-    fn try_replace(values: &HashMap<IrId, Value>, val: &mut Value) {
+    fn try_replace(values: &FxHashMap<IrId, Value>, val: &mut Value) {
         while let Value::Id(id) = val {
             match values.get(id) {
                 Some(new_val) => *val = new_val.clone(),
@@ -986,7 +987,7 @@ impl InstrKind {
         }
     }
 
-    fn replace_id(values: &HashMap<IrId, Value>, id: &mut IrId) {
+    fn replace_id(values: &FxHashMap<IrId, Value>, id: &mut IrId) {
         if let Some(Value::Id(val)) = values.get(id) {
             *id = *val;
         }
@@ -994,7 +995,7 @@ impl InstrKind {
 
     fn const_fold_jmp_cond(
         &mut self,
-        values: &mut HashMap<IrId, Value>,
+        values: &mut FxHashMap<IrId, Value>,
         id: IrId,
         on_true: BlockId,
         on_false: BlockId,
@@ -1008,7 +1009,7 @@ impl InstrKind {
         }
     }
 
-    fn const_fold_un(values: &mut HashMap<IrId, Value>, op: UnOp, id: IrId, arg: IrId) -> bool {
+    fn const_fold_un(values: &mut FxHashMap<IrId, Value>, op: UnOp, id: IrId, arg: IrId) -> bool {
         match op {
             UnOp::IsVoid if values.get(&arg) == Some(&Value::Void) => {
                 Self::insert_val(values, id, Value::Bool(true));
@@ -1048,7 +1049,7 @@ impl InstrKind {
     }
 
     fn const_fold_bin(
-        values: &mut HashMap<IrId, Value>,
+        values: &mut FxHashMap<IrId, Value>,
         op: BinOp,
         id: IrId,
         lhs: Value,
@@ -1092,7 +1093,7 @@ impl InstrKind {
         }
     }
 
-    fn insert_val(values: &mut HashMap<IrId, Value>, id: IrId, val: Value) -> Option<Value> {
+    fn insert_val(values: &mut FxHashMap<IrId, Value>, id: IrId, val: Value) -> Option<Value> {
         values.insert(id, val)
     }
 }

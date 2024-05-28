@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use crate::{
     ast::*,
+    fxhash::FxHashMap,
     lexer::{LexError, LexErrorKind},
     parser::{ParseError, ParseErrorKind, ParseResult, Parser},
     span::Span,
@@ -148,7 +147,7 @@ impl<'a> Checker<'a> {
             id,
             Some(parent),
             parent_data.attrs().clone(),
-            HashMap::new(),
+            FxHashMap::default(),
             vtable,
         )
         .map_err(|kind| TypeError::new(kind, span))?;
@@ -838,7 +837,7 @@ impl<'a> PrototypeChecker<'a> {
             id,
             Some(parent_id),
             parent_data.attrs().clone(),
-            HashMap::new(),
+            FxHashMap::default(),
             vtable,
         )
         .map_err(|kind| TypeError::new(kind, *span))?;
