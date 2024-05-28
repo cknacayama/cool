@@ -1,8 +1,8 @@
-use std::{collections::VecDeque, slice::IterMut};
+use std::collections::VecDeque;
 
 use crate::{
     ast::{BinOp, UnOp},
-    fxhash::FxHashMap,
+    fxhash::{FxHashMap, FxHashSet},
     index_vec::{index_vec, IndexVec, Key},
     types::TypeId,
 };
@@ -20,7 +20,7 @@ type Dominated = IndexVec<BlockId, Vec<BlockId>>;
 type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
 type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstrId(usize);
 
 impl InstrId {
@@ -31,6 +31,10 @@ impl InstrId {
     pub fn next(self) -> Self {
         Self(self.0 + 1)
     }
+
+    fn next_nth(self, n: usize) -> Self {
+        Self(self.0 + n)
+    }
 }
 
 impl Key for InstrId {
@@ -40,6 +44,21 @@ impl Key for InstrId {
 
     fn from_index(index: usize) -> Self {
         Self(index)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarUses {
+    decl: InstrId,
+    uses: FxHashSet<InstrId>,
+}
+
+impl VarUses {
+    pub fn new(decl: InstrId) -> Self {
+        Self {
+            decl,
+            uses: FxHashSet::default(),
+        }
     }
 }
 
@@ -57,10 +76,6 @@ pub struct Function {
 }
 
 impl Function {
-    pub fn new(instrs: IndexVec<InstrId, Instr>, blocks: IndexVec<BlockId, BlockData>) -> Self {
-        Self { instrs, blocks }
-    }
-
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
         let BlockData { end, .. } = self.blocks[block];
 
@@ -81,23 +96,54 @@ impl Function {
         }
     }
 
-    fn successors_instrs_visit<F: FnMut((BlockId, IterMut<Instr>))>(
+    fn rename_phi_arg(
+        &mut self,
+        pred: BlockId,
+        block: BlockId,
+        renames: &FxHashMap<IrId, Vec<IrId>>,
+        position: usize,
+        uses: &mut FxHashMap<IrId, VarUses>,
+    ) {
+        let iter = self
+            .instrs_block_iter_mut(block)
+            .filter_map(|(id, instr)| match instr.kind {
+                InstrKind::Phi(_, ref mut args) => Some((id, args)),
+                _ => None,
+            });
+
+        for (instr, args) in iter {
+            if let Value::Id(id) = args[position].0 {
+                let cur_id = renames[&id].last().unwrap();
+                args[position].0 = Value::Id(*cur_id);
+                update_var_uses(uses, cur_id, instr);
+                args[position].1 = pred;
+            }
+        }
+    }
+
+    fn rename_successor_phi_arg(
         &mut self,
         block: BlockId,
-        mut f: F,
+        renames: &FxHashMap<IrId, Vec<IrId>>,
+        preds: &Predecessors,
+        uses: &mut FxHashMap<IrId, VarUses>,
     ) {
         let BlockData { end, .. } = self.blocks[block];
         let end = end.prev();
 
         match self.instrs[end].kind {
             InstrKind::Jmp(target) => {
-                f((target, self.instrs_block_mut(target).iter_mut()));
+                let position = preds[target].iter().position(|&p| p == block).unwrap();
+                self.rename_phi_arg(block, target, renames, position, uses);
             }
+
             InstrKind::JmpCond {
                 on_true, on_false, ..
             } => {
-                f((on_true, self.instrs_block_mut(on_true).iter_mut()));
-                f((on_false, self.instrs_block_mut(on_false).iter_mut()));
+                let position = preds[on_true].iter().position(|&p| p == block).unwrap();
+                self.rename_phi_arg(block, on_true, renames, position, uses);
+                let position = preds[on_false].iter().position(|&p| p == block).unwrap();
+                self.rename_phi_arg(block, on_false, renames, position, uses);
             }
             InstrKind::Return(_) => {}
             _ => unreachable!(),
@@ -109,9 +155,15 @@ impl Function {
         &self.instrs[start..end]
     }
 
-    fn instrs_block_mut(&mut self, block: BlockId) -> &mut [Instr] {
+    fn instrs_block_iter_mut(
+        &mut self,
+        block: BlockId,
+    ) -> impl Iterator<Item = (InstrId, &mut Instr)> {
         let BlockData { start, end, .. } = self.blocks[block];
-        &mut self.instrs[start..end]
+        self.instrs[start..end]
+            .iter_mut()
+            .enumerate()
+            .map(move |(i, instr)| (start.next_nth(i), instr))
     }
 }
 
@@ -195,9 +247,9 @@ impl FunctionOptmizer {
         let dom_frontiers = self.dominance_frontiers(&preds);
         let phis = self.phi_positions(&preds, &dom_frontiers);
 
-        self.mem2reg(&preds, phis);
+        let mut uses = self.mem2reg(&preds, phis);
 
-        while self.const_propagation() | self.dead_code_elimination() {}
+        while self.const_propagation(&mut uses) | self.dead_code_elimination(&mut uses) {}
 
         self.remove_nops();
     }
@@ -424,24 +476,6 @@ impl FunctionOptmizer {
         uses
     }
 
-    fn all_uses(&self) -> FxHashMap<IrId, (InstrId, Vec<InstrId>)> {
-        let mut uses = FxHashMap::default();
-
-        for (id, instr) in self.instrs() {
-            let (decl, used) = instr.kind.uses();
-            if let Some(decl) = decl {
-                uses.entry(decl).or_insert((id, vec![])).0 = id;
-            }
-            if let Some(used) = used {
-                for u in used.into_vec() {
-                    uses.entry(u).or_insert((id, vec![])).1.push(id);
-                }
-            }
-        }
-
-        uses
-    }
-
     fn local_liveness_check(
         &self,
         preds: &Predecessors,
@@ -508,7 +542,7 @@ impl FunctionOptmizer {
         phi_positions
     }
 
-    fn rename_ids(&mut self, preds: &Predecessors) {
+    fn rename_ids(&mut self, preds: &Predecessors) -> FxHashMap<IrId, VarUses> {
         fn rename(
             function: &mut Function,
             block: BlockId,
@@ -516,29 +550,20 @@ impl FunctionOptmizer {
             cur_tmp: &mut IrId,
             preds: &Predecessors,
             dom_tree: &DominatorTree,
+            uses: &mut FxHashMap<IrId, VarUses>,
         ) {
             let mut defined = vec![];
-            for instr in function.instrs_block_mut(block) {
-                if let Some(id) = instr.kind.rename(renames, cur_tmp) {
+
+            for (id, instr) in function.instrs_block_iter_mut(block) {
+                if let Some(id) = instr.kind.rename(id, renames, cur_tmp, uses) {
                     defined.push(id);
                 }
             }
 
-            function.successors_instrs_visit(block, |(s, i)| {
-                let j = preds[s].iter().position(|&p| p == block).unwrap();
-                for args in i.filter_map(|instr| match instr.kind {
-                    InstrKind::Phi(_, ref mut args) => Some(args),
-                    _ => None,
-                }) {
-                    if let Value::Id(id) = args[j].0 {
-                        args[j].0 = Value::Id(*renames[&id].last().unwrap());
-                        args[j].1 = block;
-                    }
-                }
-            });
+            function.rename_successor_phi_arg(block, renames, preds, uses);
 
             for child in dom_tree[block].iter().copied() {
-                rename(function, child, renames, cur_tmp, preds, dom_tree);
+                rename(function, child, renames, cur_tmp, preds, dom_tree, uses);
             }
 
             for id in defined.iter() {
@@ -548,6 +573,7 @@ impl FunctionOptmizer {
 
         let mut renames = FxHashMap::default();
         let mut cur_tmp = IrId::Renamed(0);
+        let mut uses = FxHashMap::default();
 
         rename(
             &mut self.function,
@@ -556,7 +582,10 @@ impl FunctionOptmizer {
             &mut cur_tmp,
             preds,
             &self.dom_tree,
-        )
+            &mut uses,
+        );
+
+        uses
     }
 
     fn insert_phis(&mut self, phis: PhiPositions) {
@@ -638,73 +667,47 @@ impl FunctionOptmizer {
         self.function.blocks = blocks;
     }
 
-    fn mem2reg(&mut self, preds: &Predecessors, phis: PhiPositions) {
+    fn mem2reg(&mut self, preds: &Predecessors, phis: PhiPositions) -> FxHashMap<IrId, VarUses> {
         self.insert_phis(phis);
-        self.rename_ids(preds);
+        self.rename_ids(preds)
     }
 
-    fn dead_code_elimination(&mut self) -> bool {
+    fn dead_code_elimination(&mut self, uses: &mut FxHashMap<IrId, VarUses>) -> bool {
         let mut res = self.remove_dead_blocks();
 
-        // contains the (use_count, decl_ref, variables_used_in_decl)
-        let mut counter = FxHashMap::default();
-
-        for instr in self
-            .instrs_mut()
-            .into_iter()
-            .map(|(_, instr)| &mut instr.kind)
-        {
-            let (decl, used) = instr.uses();
-            if let Some(used) = used.as_ref() {
-                for u in used.iter() {
-                    let (used, _, _) = counter.entry(*u).or_insert((0, None, None));
-                    *used += 1;
-                }
-            }
-            if let Some(decl) = decl {
-                let use_count = match counter.get(&decl) {
-                    Some((use_count, _, _)) => *use_count,
-                    None => 0,
-                };
-                counter.insert(decl, (use_count, Some(instr), used));
-            }
-        }
-
-        while let Some(id) = counter.iter().find_map(|(id, (use_count, i, _))| {
-            if *use_count == 0 && !i.as_ref().unwrap().is_function() {
+        while let Some(id) = uses.iter().find_map(|(id, VarUses { decl, uses })| {
+            if (uses.is_empty() || uses.iter().all(|u| self.instrs()[*u].kind.is_nop()))
+                && !self.instrs()[*decl].kind.is_function()
+            {
                 Some(*id)
             } else {
                 None
             }
         }) {
             res = true;
-            let (_, instr, used) = counter.remove(&id).unwrap();
-            let instr = instr.unwrap();
-            instr.replace_with_nop();
-            if let Some(used) = used {
-                for u in used.iter() {
-                    let (used, _, _) = counter.get_mut(u).unwrap();
-                    *used -= 1;
-                }
+
+            let VarUses { decl, .. } = uses.remove(&id).unwrap();
+            self.instrs_mut()[decl].kind.replace_with_nop();
+            for uses in uses.values_mut() {
+                uses.uses.remove(&decl);
             }
         }
 
         res
     }
 
-    fn const_propagation(&mut self) -> bool {
+    fn const_propagation(&mut self, uses: &mut FxHashMap<IrId, VarUses>) -> bool {
         let mut values = FxHashMap::default();
         let mut work_list = (0..self.instrs().len())
             .map(InstrId)
             .collect::<VecDeque<_>>();
         let mut changed = false;
-        let uses = self.all_uses();
 
         while let Some(id) = work_list.pop_front() {
             let instr = &mut self.instrs_mut()[id];
-            if let Some(used) = instr.kind.const_fold(&mut values, &uses) {
+            if let Some(uses) = instr.kind.const_fold(&mut values, uses) {
                 changed = true;
-                work_list.extend(used);
+                work_list.extend(uses.uses);
             }
         }
 
@@ -712,22 +715,36 @@ impl FunctionOptmizer {
     }
 }
 
+fn update_var_use_decl(uses: &mut FxHashMap<IrId, VarUses>, id: IrId, instr_id: InstrId) {
+    uses.entry(id)
+        .or_insert_with(|| VarUses::new(instr_id))
+        .decl = instr_id;
+}
+
+fn update_var_uses(uses: &mut FxHashMap<IrId, VarUses>, id: &IrId, instr_id: InstrId) {
+    uses.get_mut(id).unwrap().uses.insert(instr_id);
+}
+
 impl InstrKind {
     pub fn rename(
         &mut self,
+        instr_id: InstrId,
         renames: &mut FxHashMap<IrId, Vec<IrId>>,
         tmp: &mut IrId,
+        uses: &mut FxHashMap<IrId, VarUses>,
     ) -> Option<IrId> {
         match self {
             Self::Nop | Self::Vtable(_, _) | Self::Label(_) | Self::Jmp(_) => {}
 
-            Self::Function { params, .. } => {
+            Self::Function { id, params, .. } => {
                 for (_, param) in params.iter_mut() {
                     let new_id = tmp.next_mut();
                     let old_id = *param;
                     renames.entry(old_id).or_default().push(new_id);
                     *param = new_id;
+                    update_var_use_decl(uses, new_id, instr_id);
                 }
+                update_var_use_decl(uses, *id, instr_id);
             }
 
             Self::Local(_, _) => {
@@ -737,21 +754,25 @@ impl InstrKind {
             Self::JmpCond { src: id, .. } => {
                 let cur_id = renames.get(id).unwrap().last().unwrap();
                 *id = *cur_id;
+                update_var_uses(uses, cur_id, instr_id);
             }
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
                     let cur_id = renames.get(id).unwrap().last().unwrap();
                     *id = *cur_id;
+                    update_var_uses(uses, cur_id, instr_id);
                 }
             }
 
             Self::Store(id1, _, id2) if id1.is_ptr() => {
                 let cur_id1 = renames.get(id1).unwrap().last().unwrap();
                 *id1 = *cur_id1;
+                update_var_uses(uses, cur_id1, instr_id);
                 if let Value::Id(id2) = id2 {
                     let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
+                    update_var_uses(uses, cur_id2, instr_id);
                 }
             }
 
@@ -762,6 +783,8 @@ impl InstrKind {
                     let old_id = *id1;
                     renames.entry(old_id).or_default().push(new_id);
                     *self = Self::Assign(new_id, Value::Id(cur_id));
+                    update_var_uses(uses, &cur_id, instr_id);
+                    update_var_use_decl(uses, new_id, instr_id);
                     return Some(old_id);
                 }
                 val => {
@@ -770,6 +793,7 @@ impl InstrKind {
                     renames.entry(old_id).or_default().push(new_id);
                     let val = std::mem::take(val);
                     *self = Self::Assign(new_id, val);
+                    update_var_use_decl(uses, new_id, instr_id);
                     return Some(old_id);
                 }
             },
@@ -777,10 +801,12 @@ impl InstrKind {
             Self::AssignLoad { dst, src, .. } if src.is_ptr() => {
                 let cur_id2 = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id2;
+                update_var_uses(uses, cur_id2, instr_id);
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
 
@@ -790,6 +816,8 @@ impl InstrKind {
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
+                update_var_uses(uses, &cur_id2, instr_id);
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
 
@@ -801,12 +829,15 @@ impl InstrKind {
             } => {
                 let cur_lhs = renames.get(lhs).unwrap().last().unwrap();
                 *lhs = *cur_lhs;
+                update_var_uses(uses, cur_lhs, instr_id);
                 let cur_rhs = renames.get(rhs).unwrap().last().unwrap();
                 *rhs = *cur_rhs;
+                update_var_uses(uses, cur_rhs, instr_id);
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
 
@@ -822,13 +853,16 @@ impl InstrKind {
                 dst,
                 rhs: Value::Id(src),
                 ..
-            } => {
+            }
+            | Self::AssignExtract(dst, src, _) => {
                 let cur_id = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id;
+                update_var_uses(uses, cur_id, instr_id);
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
 
@@ -836,6 +870,7 @@ impl InstrKind {
                 if !id2.is_global() {
                     let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
+                    update_var_uses(uses, cur_id2, instr_id);
                 }
                 for id in args.iter_mut().filter_map(|(_, val)| match val {
                     Value::Id(id) => Some(id),
@@ -843,46 +878,25 @@ impl InstrKind {
                 }) {
                     let cur_id = renames.get(id).unwrap().last().unwrap();
                     *id = *cur_id;
+                    update_var_uses(uses, cur_id, instr_id);
                 }
                 let new_id = tmp.next_mut();
                 let old_id = *id1;
                 renames.entry(old_id).or_default().push(new_id);
                 *id1 = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
 
-            Self::AssignExtract(id1, id2, _) => {
-                let cur_id2 = renames.get(id2).unwrap().last().unwrap();
-                *id2 = *cur_id2;
-                let new_id = tmp.next_mut();
-                let old_id = *id1;
-                renames.entry(old_id).or_default().push(new_id);
-                *id1 = new_id;
-                return Some(old_id);
-            }
-
-            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::AssignToObj(dst, _, _) => {
+            Self::Assign(dst, _)
+            | Self::AssignBin { dst, .. }
+            | Self::AssignToObj(dst, _, _)
+            | Self::Phi(dst, _) => {
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
-                return Some(old_id);
-            }
-
-            Self::Phi(id, vals) => {
-                if !id.is_local() {
-                    for val in vals.iter_mut().filter_map(|(val, _)| match val {
-                        Value::Id(id) if !id.is_renamed() => Some(id),
-                        _ => None,
-                    }) {
-                        let cur_val = renames.get(val).unwrap().last().unwrap();
-                        *val = *cur_val;
-                    }
-                }
-                let new_id = tmp.next_mut();
-                let old_id = *id;
-                renames.entry(old_id).or_default().push(new_id);
-                *id = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
         }
@@ -894,27 +908,36 @@ impl InstrKind {
         *self = Self::Nop;
     }
 
-    fn const_fold<'b>(
-        &'b mut self,
+    #[inline]
+    fn const_fold(
+        &mut self,
         values: &mut FxHashMap<IrId, Value>,
-        uses: &'b FxHashMap<IrId, (InstrId, Vec<InstrId>)>,
-    ) -> Option<impl Iterator<Item = InstrId> + '_> {
+        uses: &mut FxHashMap<IrId, VarUses>,
+    ) -> Option<VarUses> {
         match self {
             InstrKind::Assign(id, val) => {
+                let mut val = std::mem::take(val);
+                Self::try_replace(values, &mut val);
                 Self::insert_val(values, *id, val.clone());
-                let uses = uses[id].1.iter().copied();
+                let folded = uses.remove(id).unwrap();
+                if let Value::Id(ref id) = val {
+                    let uses_mut = uses.get_mut(id).unwrap();
+                    uses_mut.uses.extend(folded.uses.iter());
+                    uses_mut.uses.remove(&folded.decl);
+                }
                 self.replace_with_nop();
-                Some(uses)
+                Some(folded)
             }
             InstrKind::AssignUn { op, dst, src } => {
                 let op = *op;
                 let dst = *dst;
-                Self::replace_id(values, src);
+                Self::try_replace_id(values, src);
                 let src = *src;
                 if Self::const_fold_un(values, op, dst, src) {
-                    let uses = uses[&dst].1.iter().copied();
+                    let folded = uses.remove(&dst).unwrap();
+                    uses.get_mut(&src).unwrap().uses.remove(&folded.decl);
                     self.replace_with_nop();
-                    Some(uses)
+                    Some(folded)
                 } else {
                     None
                 }
@@ -924,12 +947,16 @@ impl InstrKind {
                 let dst = *dst;
                 Self::try_replace(values, lhs);
                 Self::try_replace(values, rhs);
-                let lhs = lhs.clone();
-                let rhs = rhs.clone();
                 if Self::const_fold_bin(values, op, dst, lhs, rhs) {
-                    let uses = uses[&dst].1.iter().copied();
+                    let folded = uses.remove(&dst).unwrap();
+                    if let Value::Id(lhs) = lhs {
+                        uses.get_mut(lhs).unwrap().uses.remove(&folded.decl);
+                    }
+                    if let Value::Id(rhs) = rhs {
+                        uses.get_mut(rhs).unwrap().uses.remove(&folded.decl);
+                    }
                     self.replace_with_nop();
-                    Some(uses)
+                    Some(folded)
                 } else {
                     None
                 }
@@ -940,7 +967,7 @@ impl InstrKind {
                 on_true,
                 on_false,
             } => {
-                Self::replace_id(values, src);
+                Self::try_replace_id(values, src);
                 let id = *src;
                 let on_true = *on_true;
                 let on_false = *on_false;
@@ -952,12 +979,12 @@ impl InstrKind {
                 for arg in args.iter_mut().map(|(_, id)| id) {
                     Self::try_replace(values, arg);
                 }
-                Self::replace_id(values, id);
+                Self::try_replace_id(values, id);
                 None
             }
 
             InstrKind::AssignExtract(_, id, _) => {
-                Self::replace_id(values, id);
+                Self::try_replace_id(values, id);
                 None
             }
             InstrKind::Phi(_, vals) => {
@@ -978,17 +1005,20 @@ impl InstrKind {
         }
     }
 
+    #[inline(always)]
     fn try_replace(values: &FxHashMap<IrId, Value>, val: &mut Value) {
         while let Value::Id(id) = val {
             match values.get(id) {
-                Some(new_val) => *val = new_val.clone(),
+                Some(new_val) => {
+                    *val = new_val.clone();
+                }
                 None => break,
             }
         }
     }
 
-    fn replace_id(values: &FxHashMap<IrId, Value>, id: &mut IrId) {
-        if let Some(Value::Id(val)) = values.get(id) {
+    fn try_replace_id(values: &FxHashMap<IrId, Value>, id: &mut IrId) {
+        while let Some(Value::Id(val)) = values.get(id) {
             *id = *val;
         }
     }
@@ -1052,8 +1082,8 @@ impl InstrKind {
         values: &mut FxHashMap<IrId, Value>,
         op: BinOp,
         id: IrId,
-        lhs: Value,
-        rhs: Value,
+        lhs: &Value,
+        rhs: &Value,
     ) -> bool {
         match (lhs, rhs) {
             (Value::Int(lhs), Value::Int(rhs)) => {
