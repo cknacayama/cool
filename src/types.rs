@@ -203,13 +203,13 @@ impl TypeId {
     pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
 
     #[inline]
-    pub fn align(size: usize, alignment: usize) -> usize {
+    pub const fn align(size: usize, alignment: usize) -> usize {
         assert!(alignment.is_power_of_two());
         (size + alignment - 1) & !(alignment - 1)
     }
 
     #[inline]
-    fn alignment(self) -> usize {
+    const fn alignment(self) -> usize {
         match self {
             TypeId::BOOL => 1,
             _ => 8,
@@ -224,11 +224,11 @@ impl TypeId {
         }
     }
 
-    pub fn align_offset(self, cur: usize) -> usize {
+    pub const fn align_offset(self, cur: usize) -> usize {
         Self::align(cur, self.alignment())
     }
 
-    pub fn align_size(self, cur: usize) -> usize {
+    pub const fn align_size(self, cur: usize) -> usize {
         Self::align(cur, self.alignment()) + self.size_of()
     }
 

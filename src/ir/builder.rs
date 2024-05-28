@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    ast::{TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal, TypedMethod},
+    ast::{BinOp, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal, TypedMethod},
     index_vec::{index_vec, IndexVec, Key},
     types::{ClassEnv, TypeId},
 };
@@ -86,13 +86,12 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    fn get_local(&self, name: &'a str) -> IrId {
+    fn get_local(&self, name: &'a str) -> Option<IrId> {
         self.cur_locals
             .iter()
             .rev()
             .find_map(|locals| locals.get(name))
             .copied()
-            .unwrap()
     }
 
     fn set_dom(&mut self, idom: BlockId, block: BlockId) {
@@ -170,35 +169,56 @@ impl<'a> FunctionBuilder<'a> {
         self.blocks.last_mut().unwrap().push_back(kind, ty)
     }
 
-    fn set_attrs(&mut self, attrs: impl Iterator<Item = (&'a str, TypeId)>) {
-        for (name, ty) in attrs {
-            let id = self.new_ptr(name, ty);
-            let kind = InstrKind::Attr(ty.size_of(), id);
-            self.push_instr(kind, TypeId::SelfType);
+    fn set_attrs(&mut self, attrs: &[(&'a str, TypeId, usize)]) {
+        if attrs.is_empty() {
+            return;
+        }
+
+        let tmp1 = self.new_tmp();
+        let kind = InstrKind::AssignLoad {
+            dst:    tmp1,
+            size:   self.class.size_of(),
+            src:    IrId::LOCAL_SELF,
+            offset: 0,
+        };
+        self.push_instr(kind, self.class);
+        let tmp = self.new_tmp();
+        let kind = InstrKind::AssignExtract(tmp, tmp1, 0);
+        self.push_instr(kind, TypeId::INT);
+
+        for (name, ty, offset) in attrs {
+            if self.get_local(name).is_some() {
+                continue;
+            }
+            let ptr = self.new_ptr(name, *ty);
+            let kind = InstrKind::AssignBin {
+                dst: ptr,
+                op:  BinOp::Add,
+                lhs: Value::Id(tmp),
+                rhs: Value::Int(*offset as i64),
+            };
+            self.push_instr(kind, TypeId::INT);
         }
     }
 
-    fn set_params(&mut self, locals: impl Iterator<Item = (&'a str, TypeId)>) {
-        let tmp = self.new_tmp();
-        let kind = InstrKind::Param(self.class.size_of(), tmp);
-        self.push_instr(kind, self.class);
-
+    fn set_self(&mut self) {
         let id = self.new_local("self", self.class);
         let kind = InstrKind::Local(self.class.size_of(), id);
         self.push_instr(kind, TypeId::SelfType);
 
-        let kind = InstrKind::Store(id, self.class.size_of(), Value::Id(tmp));
+        let kind = InstrKind::Store(id, self.class.size_of(), Value::Id(IrId::Tmp(0)));
         self.push_instr(kind, TypeId::SelfType);
+    }
 
-        for (name, ty) in locals {
-            let tmp = self.new_tmp();
-            let kind = InstrKind::Param(ty.size_of(), tmp);
-            self.push_instr(kind, ty);
+    fn set_params(&mut self, locals: impl Iterator<Item = (&'a str, TypeId)>) {
+        self.set_self();
 
+        for (pos, (name, ty)) in locals.enumerate() {
             let id = self.new_local(name, ty);
             let kind = InstrKind::Local(ty.size_of(), id);
             self.push_instr(kind, ty);
 
+            let tmp = IrId::Tmp(pos as u32 + 1);
             let kind = InstrKind::Store(id, ty.size_of(), Value::Id(tmp));
             self.push_instr(kind, TypeId::SelfType);
         }
@@ -333,7 +353,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     fn get_local(&self, name: &'a str) -> IrId {
-        self.cur_function().get_local(name)
+        self.cur_function().get_local(name).unwrap()
     }
 
     fn push_instr(&mut self, kind: InstrKind, ty: TypeId) {
@@ -436,33 +456,53 @@ impl<'a> IrBuilder<'a> {
         } = class;
 
         self.cur_class = type_id;
+        let mut class_attrs = self
+            .env
+            .get_class(type_id)
+            .unwrap()
+            .attrs()
+            .iter()
+            .map(|(k, ty)| (*k, *ty, 0))
+            .collect::<Vec<_>>();
+
+        class_attrs.sort_by(|(_, ty1, _), (_, ty2, _)| ty1.size_of().cmp(&ty2.size_of()).reverse());
+
+        let mut cur_offset = 0;
+        for (_, ty, offset) in class_attrs.iter_mut() {
+            *offset = ty.align_offset(cur_offset);
+            cur_offset = *offset + ty.size_of();
+        }
 
         // self.build_new(type_id);
 
         for method in methods.into_vec() {
-            self.build_function(method);
+            self.build_function(method, &class_attrs);
         }
     }
 
-    fn build_function(&mut self, typed_method: TypedMethod<'a>) -> HashMap<&'a str, IrId> {
+    fn build_function(
+        &mut self,
+        typed_method: TypedMethod<'a>,
+        class_attrs: &[(&'a str, TypeId, usize)],
+    ) -> HashMap<&'a str, IrId> {
         let id = typed_method.id();
+
         let params = typed_method.params();
 
-        let function_id = self.globals_map.get(&(self.cur_class, id)).unwrap();
         let mut function = FunctionBuilder::new(self.cur_class);
-        let class_attrs = self.env.get_class(self.cur_class).unwrap().attrs();
+        let function_id = *self.globals_map.get(&(self.cur_class, id)).unwrap();
+        let mut function_params = vec![(self.cur_class.size_of(), function.new_tmp())];
+        function_params.extend(params.iter().map(|f| (f.ty.size_of(), function.new_tmp())));
 
         function.begin_scope();
-        let mut instr_params = vec![self.cur_class];
-        instr_params.extend(params.iter().map(|f| f.ty));
         let kind = InstrKind::Function {
-            id:    IrId::Global(*function_id),
-            ret:   typed_method.return_ty().size_of(),
-            arity: instr_params.len(),
+            id:     IrId::Global(function_id),
+            ret:    typed_method.return_ty().size_of(),
+            params: function_params.into_boxed_slice(),
         };
         function.push_instr(kind, TypeId::SelfType);
         function.set_params(params.iter().map(|f| (f.id, f.ty)));
-        function.set_attrs(class_attrs.iter().map(|(k, ty)| (*k, *ty)));
+        function.set_attrs(class_attrs);
         self.globals.push(Some(GlobalValue::Function(function)));
 
         let (body, ty) = self.build_expr(typed_method.take_body());

@@ -12,9 +12,11 @@ pub mod block;
 pub mod builder;
 pub mod opt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Value {
+    #[default]
     Void,
+
     Id(IrId),
     Int(i64),
     Bool(bool),
@@ -39,11 +41,10 @@ pub enum InstrKind {
 
     Vtable(GlobalId, Box<[GlobalId]>),
     Function {
-        id:    IrId,
-        ret:   usize,
-        arity: usize,
+        id:     IrId,
+        ret:    usize,
+        params: Box<[(usize, IrId)]>,
     },
-    Param(usize, IrId),
     Return(Value),
     Label(BlockId),
 
@@ -81,7 +82,6 @@ pub enum InstrKind {
         offset: usize,
     },
     Store(IrId, usize, Value),
-    Attr(usize, IrId),
 }
 
 impl InstrKind {
@@ -101,10 +101,11 @@ impl InstrKind {
         match self {
             Self::Nop | Self::Label(_) | Self::Jmp(_) => (None, None),
 
-            Self::Function { id, .. }
-            | Self::Param(_, id)
-            | Self::Local(_, id)
-            | Self::Attr(_, id) => (Some(*id), None),
+            Self::Function { id, params, .. } => {
+                (Some(*id), Some(params.iter().map(|(_, id)| *id).collect()))
+            }
+
+            Self::Local(_, id) => (Some(*id), None),
 
             Self::Vtable(dst, ids) => (
                 Some(IrId::Global(*dst)),
@@ -201,10 +202,16 @@ impl fmt::Display for InstrKind {
                 }
                 write!(f, "]")
             }
-            InstrKind::Function { id, ret, arity } => {
-                write!(f, "function {} {}, {} {{", ret, id, arity)
+            InstrKind::Function { id, ret, params } => {
+                write!(f, "function {} {}(", id, ret)?;
+                for (i, (ty, id)) in params.iter().enumerate() {
+                    write!(f, "{} {}", ty, id)?;
+                    if i != params.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ") {{")
             }
-            InstrKind::Param(ty, id) => write!(f, "    param {} {}", ty, id),
             InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),
             InstrKind::Label(subs) => write!(f, "block{}:", subs),
             InstrKind::Jmp(subs) => write!(f, "    jmp block{}", subs),
@@ -258,7 +265,6 @@ impl fmt::Display for InstrKind {
                 write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
             }
             InstrKind::Store(name, ty, id) => write!(f, "    store {}, {} {}", name, ty, id),
-            InstrKind::Attr(ty, name) => write!(f, "    attr {} {}", ty, name),
         }
     }
 }

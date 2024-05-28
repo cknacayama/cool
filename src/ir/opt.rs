@@ -718,11 +718,16 @@ impl InstrKind {
         tmp: &mut IrId,
     ) -> Option<IrId> {
         match self {
-            Self::Nop
-            | Self::Function { .. }
-            | Self::Vtable(_, _)
-            | Self::Label(_)
-            | Self::Jmp(_) => {}
+            Self::Nop | Self::Vtable(_, _) | Self::Label(_) | Self::Jmp(_) => {}
+
+            Self::Function { params, .. } => {
+                for (_, param) in params.iter_mut() {
+                    let new_id = tmp.next_mut();
+                    let old_id = *param;
+                    renames.entry(old_id).or_default().push(new_id);
+                    *param = new_id;
+                }
+            }
 
             Self::Local(_, _) => {
                 *self = Self::Nop;
@@ -758,11 +763,12 @@ impl InstrKind {
                     *self = Self::Assign(new_id, Value::Id(cur_id));
                     return Some(old_id);
                 }
-                _ => {
+                val => {
                     let new_id = tmp.next_mut();
                     let old_id = *id1;
                     renames.entry(old_id).or_default().push(new_id);
-                    *id1 = new_id;
+                    let val = std::mem::take(val);
+                    *self = Self::Assign(new_id, val);
                     return Some(old_id);
                 }
             },
@@ -854,11 +860,7 @@ impl InstrKind {
                 return Some(old_id);
             }
 
-            Self::Param(_, dst)
-            | Self::Assign(dst, _)
-            | Self::Attr(_, dst)
-            | Self::AssignBin { dst, .. }
-            | Self::AssignToObj(dst, _, _) => {
+            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::AssignToObj(dst, _, _) => {
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
