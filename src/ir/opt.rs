@@ -24,11 +24,11 @@ type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, T
 pub struct InstrId(usize);
 
 impl InstrId {
-    pub fn prev(self) -> Self {
+    fn prev(self) -> Self {
         Self(self.0 - 1)
     }
 
-    pub fn next(self) -> Self {
+    fn next(self) -> Self {
         Self(self.0 + 1)
     }
 
@@ -302,7 +302,6 @@ impl FunctionOptmizer {
                 new_blocks[*block] = Some(id);
                 *block = id;
             }
-
             self.rename_blocks(&new_blocks);
         }
 
@@ -354,7 +353,7 @@ impl FunctionOptmizer {
                     if vals.is_empty() {
                         instr.kind.replace_with_nop();
                     } else if vals.len() == 1 {
-                        let val = vals[0].0.clone();
+                        let val = std::mem::take(&mut vals[0].0);
                         instr.kind = InstrKind::Assign(id, val);
                     }
                 }
@@ -441,8 +440,8 @@ impl FunctionOptmizer {
     fn all_stores(&self) -> IndexVec<LocalId, (BlockId, Vec<BlockId>)> {
         let mut stores = IndexVec::with_capacity(self.locals.len());
 
-        for local_block in self.locals.inner().iter().map(|(_, block)| *block) {
-            stores.push((local_block, vec![]));
+        for block in self.locals.inner().iter().map(|(_, block)| *block) {
+            stores.push((block, vec![]));
         }
 
         for block_id in self.block_ids() {
@@ -523,14 +522,11 @@ impl FunctionOptmizer {
                     .filter(|frontier| live_in[**frontier].contains(&local))
                     .copied()
                 {
-                    let phis = &mut phi_positions[frontier];
+                    let phis = phi_positions.get_mut(frontier).unwrap();
                     if !phis.iter().any(|(l, _, _)| *l == local) {
                         let ty = self.locals[local].0;
-                        phis.push((
-                            local,
-                            vec![(local, frontier); preds[frontier].len()].into(),
-                            ty,
-                        ));
+                        let args = vec![(local, frontier); preds[frontier].len()].into();
+                        phis.push((local, args, ty));
                         if !stores.contains(&frontier) {
                             stores.push(frontier);
                         }
@@ -676,9 +672,7 @@ impl FunctionOptmizer {
         let mut res = self.remove_dead_blocks();
 
         while let Some(id) = uses.iter().find_map(|(id, VarUses { decl, uses })| {
-            if (uses.is_empty() || uses.iter().all(|u| self.instrs()[*u].kind.is_nop()))
-                && !self.instrs()[*decl].kind.is_function()
-            {
+            if uses.is_empty() && !self.instrs()[*decl].kind.is_function() {
                 Some(*id)
             } else {
                 None
@@ -918,13 +912,13 @@ impl InstrKind {
             InstrKind::Assign(id, val) => {
                 let mut val = std::mem::take(val);
                 Self::try_replace(values, &mut val);
-                Self::insert_val(values, *id, val.clone());
                 let folded = uses.remove(id).unwrap();
                 if let Value::Id(ref id) = val {
                     let uses_mut = uses.get_mut(id).unwrap();
                     uses_mut.uses.extend(folded.uses.iter());
                     uses_mut.uses.remove(&folded.decl);
                 }
+                values.insert(*id, val);
                 self.replace_with_nop();
                 Some(folded)
             }
@@ -932,10 +926,9 @@ impl InstrKind {
                 let op = *op;
                 let dst = *dst;
                 Self::try_replace_id(values, src);
-                let src = *src;
                 if Self::const_fold_un(values, op, dst, src) {
                     let folded = uses.remove(&dst).unwrap();
-                    uses.get_mut(&src).unwrap().uses.remove(&folded.decl);
+                    uses.get_mut(src).unwrap().uses.remove(&folded.decl);
                     self.replace_with_nop();
                     Some(folded)
                 } else {
@@ -1009,14 +1002,13 @@ impl InstrKind {
     fn try_replace(values: &FxHashMap<IrId, Value>, val: &mut Value) {
         while let Value::Id(id) = val {
             match values.get(id) {
-                Some(new_val) => {
-                    *val = new_val.clone();
-                }
+                Some(new_val) => *val = new_val.clone(),
                 None => break,
             }
         }
     }
 
+    #[inline(always)]
     fn try_replace_id(values: &FxHashMap<IrId, Value>, id: &mut IrId) {
         while let Some(Value::Id(val)) = values.get(id) {
             *id = *val;
@@ -1039,42 +1031,37 @@ impl InstrKind {
         }
     }
 
-    fn const_fold_un(values: &mut FxHashMap<IrId, Value>, op: UnOp, id: IrId, arg: IrId) -> bool {
+    fn const_fold_un(values: &mut FxHashMap<IrId, Value>, op: UnOp, id: IrId, arg: &IrId) -> bool {
         match op {
-            UnOp::IsVoid if values.get(&arg) == Some(&Value::Void) => {
-                Self::insert_val(values, id, Value::Bool(true));
-                true
-            }
+            UnOp::IsVoid => match values.get(arg) {
+                Some(Value::Int(_) | Value::Str(_) | Value::Bool(_)) => {
+                    values.insert(id, Value::Bool(false));
+                    true
+                }
+                Some(Value::Void) => {
+                    values.insert(id, Value::Bool(true));
+                    true
+                }
+                _ => false,
+            },
 
-            UnOp::IsVoid
-                if matches!(
-                    values.get(&arg),
-                    Some(Value::Int(_) | Value::Str(_) | Value::Bool(_))
-                ) =>
-            {
-                Self::insert_val(values, id, Value::Bool(false));
-                true
-            }
-
-            UnOp::Complement => match values.get(&arg) {
+            UnOp::Complement => match values.get(arg) {
                 Some(Value::Int(arg)) => {
                     let val = -arg;
-                    Self::insert_val(values, id, Value::Int(val));
+                    values.insert(id, Value::Int(val));
                     true
                 }
                 _ => false,
             },
 
-            UnOp::Not => match values.get(&arg) {
+            UnOp::Not => match values.get(arg) {
                 Some(Value::Bool(arg)) => {
                     let val = !arg;
-                    Self::insert_val(values, id, Value::Bool(val));
+                    values.insert(id, Value::Bool(val));
                     true
                 }
                 _ => false,
             },
-
-            _ => false,
         }
     }
 
@@ -1090,41 +1077,37 @@ impl InstrKind {
                 match op {
                     BinOp::Add => {
                         let val = lhs + rhs;
-                        Self::insert_val(values, id, Value::Int(val));
+                        values.insert(id, Value::Int(val));
                     }
                     BinOp::Sub => {
                         let val = lhs - rhs;
-                        Self::insert_val(values, id, Value::Int(val));
+                        values.insert(id, Value::Int(val));
                     }
                     BinOp::Mul => {
                         let val = lhs * rhs;
-                        Self::insert_val(values, id, Value::Int(val));
+                        values.insert(id, Value::Int(val));
                     }
                     BinOp::Div => {
                         let val = lhs / rhs;
-                        Self::insert_val(values, id, Value::Int(val));
+                        values.insert(id, Value::Int(val));
                     }
                     BinOp::Lt => {
                         let val = lhs < rhs;
-                        Self::insert_val(values, id, Value::Bool(val));
+                        values.insert(id, Value::Bool(val));
                     }
                     BinOp::Le => {
                         let val = lhs <= rhs;
-                        Self::insert_val(values, id, Value::Bool(val));
+                        values.insert(id, Value::Bool(val));
                     }
                     BinOp::Eq => {
                         let val = lhs == rhs;
-                        Self::insert_val(values, id, Value::Bool(val));
+                        values.insert(id, Value::Bool(val));
                     }
                 }
                 true
             }
             _ => false,
         }
-    }
-
-    fn insert_val(values: &mut FxHashMap<IrId, Value>, id: IrId, val: Value) -> Option<Value> {
-        values.insert(id, val)
     }
 }
 
@@ -1138,14 +1121,16 @@ impl IrOptmizer {
         let mut functions = vec![];
         let mut vtables = vec![];
 
-        for global in builder.globals.into_iter().filter_map(|(_, val)| val) {
-            match global {
+        builder
+            .globals
+            .into_iter()
+            .filter_map(|(_, val)| val)
+            .for_each(|global| match global {
                 GlobalValue::Vtable(kind) => vtables.push(kind),
                 GlobalValue::Function(function) => {
                     functions.push(FunctionOptmizer::from_builder(function))
                 }
-            }
-        }
+            });
 
         Self { functions, vtables }
     }
@@ -1155,9 +1140,9 @@ impl IrOptmizer {
     }
 
     pub fn optimize(&mut self) {
-        for function in self.functions.iter_mut() {
-            function.optimize();
-        }
+        self.functions
+            .iter_mut()
+            .for_each(|function| function.optimize())
     }
 
     fn instrs_with_nops(&self) -> impl Iterator<Item = &InstrKind> {
