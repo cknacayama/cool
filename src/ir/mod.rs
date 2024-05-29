@@ -67,7 +67,6 @@ pub enum InstrKind {
         op:  UnOp,
         src: IrId,
     },
-    AssignToObj(IrId, TypeId, Value),
     AssignCall(IrId, IrId, Box<[(usize, Value)]>),
     AssignExtract(IrId, IrId, usize),
     Phi(IrId, Vec<(Value, BlockId)>),
@@ -148,13 +147,10 @@ impl InstrKind {
             }
             | Self::AssignUn { dst, src, .. }
             | Self::Assign(dst, Value::Id(src))
-            | Self::AssignToObj(dst, _, Value::Id(src))
             | Self::AssignLoad { dst, src, .. }
             | Self::AssignExtract(dst, src, _) => (Some(*dst), Some([*src].into())),
 
-            Self::Assign(dst, _) | Self::AssignToObj(dst, _, _) | Self::AssignBin { dst, .. } => {
-                (Some(*dst), None)
-            }
+            Self::Assign(dst, _) | Self::AssignBin { dst, .. } => (Some(*dst), None),
 
             Self::AssignCall(dst, id2, args) => {
                 let used_ids = args
@@ -238,9 +234,6 @@ impl fmt::Display for InstrKind {
                     }
                 }
                 write!(f, ")")
-            }
-            InstrKind::AssignToObj(id, ty, val) => {
-                write!(f, "    {} = cast {}, {}", id, ty, val)
             }
             InstrKind::AssignExtract(id, obj, index) => {
                 write!(f, "    {} = extract {}, {}", id, obj, index)

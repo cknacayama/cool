@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{index_vec::Key, types::TypeId};
 
-use super::{Instr, InstrKind, Value};
+use super::{Instr, InstrKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
@@ -12,6 +12,18 @@ impl BlockId {
 
     pub fn is_entry(self) -> bool {
         self == Self::ENTRY
+    }
+
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    pub fn prev(self) -> Option<Self> {
+        if self.is_entry() {
+            None
+        } else {
+            Some(Self(self.0 - 1))
+        }
     }
 }
 
@@ -49,25 +61,12 @@ impl Block {
         }
     }
 
-    pub fn can_merge(&self) -> bool {
-        !self.instrs.iter().any(|i| {
-            !matches!(
-                i.kind,
-                InstrKind::Jmp(_) | InstrKind::Label(_) | InstrKind::Nop
-            )
-        })
-    }
-
     pub fn push_front(&mut self, instr: Instr) {
         self.instrs.push_front(instr)
     }
 
     pub fn push_back(&mut self, kind: InstrKind, ty: TypeId) {
         self.instrs.push_back(Instr::new(kind, ty))
-    }
-
-    pub fn instrs(&self) -> impl Iterator<Item = &Instr> {
-        self.instrs.iter()
     }
 
     pub fn set_label(&mut self) {
@@ -77,19 +76,5 @@ impl Block {
         let kind = InstrKind::Label(self.id);
         let instr = Instr::new(kind, TypeId::SelfType);
         self.push_front(instr)
-    }
-
-    pub fn instrs_mut(&mut self) -> impl Iterator<Item = &mut Instr> {
-        self.instrs.iter_mut()
-    }
-
-    pub fn phis_args(&mut self) -> Vec<&mut Vec<(Value, BlockId)>> {
-        let mut phis = vec![];
-        for instr in self.instrs.iter_mut() {
-            if let InstrKind::Phi(_, args) = &mut instr.kind {
-                phis.push(args);
-            }
-        }
-        phis
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, rc::Rc};
 
 use crate::{
     ast::{BinOp, UnOp},
@@ -10,7 +10,7 @@ use crate::{
 use super::{
     block::BlockId,
     builder::{FunctionBuilder, GlobalValue, IrBuilder},
-    Instr, InstrKind, IrId, LocalId, Value,
+    GlobalId, Instr, InstrKind, IrId, LocalId, Value,
 };
 
 type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
@@ -165,6 +165,26 @@ impl Function {
             .enumerate()
             .map(move |(i, instr)| (start.next_nth(i), instr))
     }
+
+    fn replace_block_with_nop(&mut self, block: BlockId) {
+        let BlockData { start, end, .. } = self.blocks[block];
+        for instr in &mut self.instrs[start..end] {
+            instr.kind.replace_with_nop();
+        }
+    }
+
+    fn filter_replace_block_with_nop<P: FnMut(&InstrKind) -> bool>(
+        &mut self,
+        block: BlockId,
+        mut pred: P,
+    ) {
+        let BlockData { start, end, .. } = self.blocks[block];
+        for instr in &mut self.instrs[start..end] {
+            if pred(&instr.kind) {
+                instr.kind.replace_with_nop();
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -251,7 +271,75 @@ impl FunctionOptmizer {
 
         while self.const_propagation(&mut uses) | self.dead_code_elimination(&mut uses) {}
 
+        self.try_merge_blocks();
+    }
+
+    fn can_merge(&self, block: BlockId) -> bool {
+        self.instrs_block(block).iter().all(|instr| {
+            matches!(
+                instr.kind,
+                InstrKind::Label(_)
+                    | InstrKind::Jmp(_)
+                    | InstrKind::Nop
+                    | InstrKind::Return(_)
+                    | InstrKind::Function { .. }
+            )
+        })
+    }
+
+    fn try_merge_blocks(&mut self) {
+        let mut start = BlockId::ENTRY;
+        let mut end = BlockId::ENTRY;
+        let mut merged = false;
+
+        for block in self.block_ids() {
+            if self.can_merge(block) {
+                end = block;
+            } else {
+                if start != end {
+                    merged = true;
+                    self.merge_blocks(start, end);
+                }
+                start = block.next();
+                end = start;
+            }
+        }
+        if start != end {
+            merged = true;
+            self.merge_blocks(start, end);
+        }
+
+        if !merged {
+            self.remove_nops();
+            return;
+        }
+
+        let mut new_blocks = index_vec![BlockId::ENTRY; self.blocks_count()];
         self.remove_nops();
+
+        for (id, block) in self
+            .blocks_mut()
+            .into_iter()
+            .map(|(id, block)| (id, &mut block.id))
+        {
+            new_blocks[*block] = id;
+            *block = id;
+        }
+        self.rename_merged_blocks(&new_blocks);
+    }
+
+    fn merge_blocks(&mut self, start: BlockId, end: BlockId) {
+        self.function.filter_replace_block_with_nop(start, |kind| {
+            !matches!(kind, InstrKind::Label(_) | InstrKind::Function { .. })
+        });
+
+        for block in (start.next().to_index()..end.to_index()).map(BlockId::from_index) {
+            self.function.replace_block_with_nop(block);
+        }
+
+        self.function.filter_replace_block_with_nop(end, |kind| {
+            !matches!(kind, InstrKind::Jmp(_) | InstrKind::Return(_))
+        });
     }
 
     fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, f: F) {
@@ -306,6 +394,33 @@ impl FunctionOptmizer {
         }
 
         removed
+    }
+
+    fn rename_merged_blocks(&mut self, new_blocks: &IndexVec<BlockId, BlockId>) {
+        for (_, instr) in self.instrs_mut() {
+            match instr.kind {
+                InstrKind::Jmp(ref mut target) => {
+                    *target = new_blocks[*target];
+                }
+                InstrKind::JmpCond {
+                    ref mut on_true,
+                    ref mut on_false,
+                    ..
+                } => {
+                    *on_true = new_blocks[*on_true];
+                    *on_false = new_blocks[*on_false];
+                }
+                InstrKind::Phi(_, ref mut vals) => {
+                    vals.iter_mut().for_each(|(_, block)| {
+                        *block = new_blocks[*block];
+                    });
+                }
+                InstrKind::Label(ref mut block) => {
+                    *block = new_blocks[*block];
+                }
+                _ => {}
+            }
+        }
     }
 
     fn rename_blocks(&mut self, new_blocks: &IndexVec<BlockId, Option<BlockId>>) {
@@ -837,7 +952,6 @@ impl InstrKind {
 
             Self::Assign(dst, Value::Id(src))
             | Self::AssignUn { dst, src, .. }
-            | Self::AssignToObj(dst, _, Value::Id(src))
             | Self::AssignBin {
                 dst,
                 lhs: Value::Id(src),
@@ -882,10 +996,7 @@ impl InstrKind {
                 return Some(old_id);
             }
 
-            Self::Assign(dst, _)
-            | Self::AssignBin { dst, .. }
-            | Self::AssignToObj(dst, _, _)
-            | Self::Phi(dst, _) => {
+            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::Phi(dst, _) => {
                 let new_id = tmp.next_mut();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
@@ -994,7 +1105,17 @@ impl InstrKind {
                 Self::try_replace(values, val);
                 None
             }
-            _ => None,
+            InstrKind::AssignLoad { src, .. } => {
+                Self::try_replace_id(values, src);
+                None
+            }
+
+            InstrKind::Local(_, _)
+            | InstrKind::Jmp(_)
+            | InstrKind::Function { .. }
+            | InstrKind::Label(_)
+            | InstrKind::Nop
+            | InstrKind::Vtable(_, _) => None,
         }
     }
 
@@ -1114,25 +1235,32 @@ impl InstrKind {
 pub struct IrOptmizer {
     functions: Vec<FunctionOptmizer>,
     vtables:   Vec<InstrKind>,
+    globals:   IndexVec<GlobalId, Rc<str>>,
 }
 
 impl IrOptmizer {
     pub fn from_builder(builder: IrBuilder) -> Self {
         let mut functions = vec![];
+        let empty_string = builder.strings().get("").unwrap().clone();
+        let mut globals = index_vec![empty_string; builder.globals.len()];
         let mut vtables = vec![];
 
-        builder
-            .globals
-            .into_iter()
-            .filter_map(|(_, val)| val)
-            .for_each(|global| match global {
-                GlobalValue::Vtable(kind) => vtables.push(kind),
-                GlobalValue::Function(function) => {
+        for (id, global) in builder.globals.into_iter() {
+            match global.value {
+                Some(GlobalValue::Vtable(kind)) => vtables.push(kind),
+                Some(GlobalValue::Function(function)) => {
                     functions.push(FunctionOptmizer::from_builder(function))
                 }
-            });
+                _ => {}
+            }
+            globals[id] = global.name;
+        }
 
-        Self { functions, vtables }
+        Self {
+            functions,
+            vtables,
+            globals,
+        }
     }
 
     pub fn functions_mut(&mut self) -> impl Iterator<Item = &mut FunctionOptmizer> {

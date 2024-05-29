@@ -244,6 +244,10 @@ impl TypeId {
         self == TypeId::OBJECT
     }
 
+    pub fn needs_cast(self) -> bool {
+        self == TypeId::INT || self == TypeId::BOOL || self == TypeId::STRING
+    }
+
     pub fn is_int(self) -> bool {
         self == TypeId::INT
     }
@@ -505,7 +509,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            builtin_vtable!(TypeId::BOOL, []),
+            builtin_vtable!(TypeId::BOOL, ["Cast"]),
         )
         .unwrap();
         let int = ClassTypeData::new(
@@ -513,7 +517,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            builtin_vtable!(TypeId::INT, []),
+            builtin_vtable!(TypeId::INT, ["Cast"]),
         )
         .unwrap();
         let string = ClassTypeData::new(
@@ -525,7 +529,7 @@ impl<'a> ClassEnv<'a> {
                 ("concat", [TypeId::STRING], TypeId::STRING),
                 ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ],
-            builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
+            builtin_vtable!(TypeId::STRING, ["Cast", "length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
@@ -600,7 +604,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            builtin_vtable!(TypeId::BOOL, []),
+            builtin_vtable!(TypeId::BOOL, ["Cast"]),
         )
         .unwrap();
         let int = ClassTypeData::new(
@@ -608,7 +612,7 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            builtin_vtable!(TypeId::INT, []),
+            builtin_vtable!(TypeId::INT, ["Cast"]),
         )
         .unwrap();
         let string = ClassTypeData::new(
@@ -620,7 +624,7 @@ impl<'a> ClassEnv<'a> {
                 ("concat", [TypeId::STRING], TypeId::STRING),
                 ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
             ],
-            builtin_vtable!(TypeId::STRING, ["length", "concat", "substr"]),
+            builtin_vtable!(TypeId::STRING, ["Cast", "length", "concat", "substr"]),
         )
         .unwrap();
         let io = ClassTypeData::new(
@@ -745,7 +749,7 @@ impl<'a> ClassEnv<'a> {
         if let Some(parent) = self.get_parent(ty) {
             match self.get_method(parent, method) {
                 Ok(parent_method) if parent_method != &data => {
-                    return Err(TypeErrorKind::RedefinedMethod(ty, method))
+                    return Err(TypeErrorKind::RedefinedMethod(ty, method));
                 }
                 Err(err) if !matches!(err, TypeErrorKind::UndefinedMethod(_, _)) => {
                     return Err(err)

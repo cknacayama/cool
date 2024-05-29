@@ -832,6 +832,7 @@ impl<'a> PrototypeChecker<'a> {
         vtable[0].0 = parent_id;
         vtable[1].0 = ty_id;
         vtable[3].0 = ty_id;
+        vtable[4].0 = ty_id;
 
         let data = ClassTypeData::new(
             id,
@@ -987,7 +988,10 @@ impl<'a> Iterator for MultiPassChecker<'a> {
             ),
             None => {
                 let checker = PrototypeChecker::new();
-                let env = checker.run(&mut self.classes).ok()?;
+                let env = match checker.run(&mut self.classes) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err.into())),
+                };
                 self.checker = Some(Checker::from_class_env(env));
                 self.next()
             }

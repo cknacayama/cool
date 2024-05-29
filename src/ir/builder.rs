@@ -1,7 +1,10 @@
 use std::rc::Rc;
 
 use crate::{
-    ast::{BinOp, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal, TypedMethod},
+    ast::{
+        BinOp, TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
+        TypedMethod,
+    },
     fxhash::{FxHashMap, FxHashSet},
     index_vec::{index_vec, IndexVec, Key},
     types::{ClassEnv, TypeId},
@@ -11,6 +14,24 @@ use super::{
     block::{Block, BlockId},
     GlobalId, Instr, InstrKind, IrId, LocalId, Value,
 };
+
+#[derive(Debug, Clone)]
+pub struct StringSet(FxHashSet<Rc<str>>);
+
+impl StringSet {
+    pub fn intern(&mut self, s: &str) -> Rc<str> {
+        if let Some(s) = self.0.get(s) {
+            return s.clone();
+        }
+        let s: Rc<str> = s.into();
+        self.0.insert(s.clone());
+        s
+    }
+
+    pub fn get(&self, s: &str) -> Option<&Rc<str>> {
+        self.0.get(s)
+    }
+}
 
 #[derive(Debug)]
 pub struct FunctionBuilder<'a> {
@@ -259,35 +280,58 @@ pub enum GlobalValue<'a> {
 }
 
 #[derive(Debug)]
+pub struct Global<'a> {
+    pub(super) name:  Rc<str>,
+    pub(super) value: Option<GlobalValue<'a>>,
+}
+
+#[derive(Debug)]
 pub struct IrBuilder<'a> {
     cur_class:          TypeId,
+    cur_function:       GlobalId,
     env:                ClassEnv<'a>,
     globals_map:        FxHashMap<(TypeId, &'a str), GlobalId>,
-    pub(super) globals: IndexVec<GlobalId, Option<GlobalValue<'a>>>,
-    strings:            FxHashSet<Rc<str>>,
+    pub(super) globals: IndexVec<GlobalId, Global<'a>>,
+    strings:            StringSet,
 }
 
 impl<'a> IrBuilder<'a> {
     pub fn new(env: ClassEnv<'a>) -> Self {
         let mut globals_map = FxHashMap::default();
         let mut globals = IndexVec::new();
+        let mut strings = StringSet(FxHashSet::default());
+        strings.0.insert(Rc::from(""));
 
         for (class, data) in env.classes() {
+            let class_name = data.id();
             let vtable = data
                 .vtable()
                 .iter()
-                .map(|(_, function)| {
-                    IrBuilder::new_function(&mut globals_map, &mut globals, class, function)
+                .map(|(ty, function)| {
+                    let ty_name = env.get_class(*ty).unwrap().id();
+                    IrBuilder::new_function(
+                        &mut strings,
+                        &mut globals_map,
+                        &mut globals,
+                        *ty,
+                        ty_name,
+                        function,
+                    )
                 })
                 .collect();
-            IrBuilder::new_vtable(&mut globals_map, &mut globals, class, vtable);
+            IrBuilder::new_vtable(
+                &mut strings,
+                &mut globals_map,
+                &mut globals,
+                class,
+                class_name,
+                vtable,
+            );
         }
-
-        let mut strings = FxHashSet::default();
-        strings.insert(Rc::from(""));
 
         Self {
             cur_class: TypeId::SelfType,
+            cur_function: GlobalId(0),
             env,
             globals_map,
             globals,
@@ -295,13 +339,13 @@ impl<'a> IrBuilder<'a> {
         }
     }
 
-    pub fn strings(&self) -> &FxHashSet<Rc<str>> {
+    pub fn strings(&self) -> &StringSet {
         &self.strings
     }
 
     pub fn functions(&self) -> impl Iterator<Item = &FunctionBuilder<'a>> {
         self.globals.inner().iter().filter_map(|m| {
-            m.as_ref().and_then(|m| match m {
+            m.value.as_ref().and_then(|m| match m {
                 GlobalValue::Function(m) => Some(m),
                 _ => None,
             })
@@ -310,7 +354,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn functions_mut(&mut self) -> impl Iterator<Item = &mut FunctionBuilder<'a>> {
         self.globals.inner_mut().iter_mut().filter_map(|m| {
-            m.as_mut().and_then(|m| match m {
+            m.value.as_mut().and_then(|m| match m {
                 GlobalValue::Function(m) => Some(m),
                 _ => None,
             })
@@ -323,7 +367,7 @@ impl<'a> IrBuilder<'a> {
             .inner()
             .iter()
             .filter_map(|m| {
-                m.as_ref().and_then(|m| match m {
+                m.value.as_ref().and_then(|m| match m {
                     GlobalValue::Vtable(instr) => Some(instr),
                     _ => None,
                 })
@@ -340,15 +384,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     fn cur_function_mut(&mut self) -> &mut FunctionBuilder<'a> {
-        match self.globals.last_mut() {
-            Some(Some(GlobalValue::Function(m))) => m,
+        match self.globals[self.cur_function].value {
+            Some(GlobalValue::Function(ref mut m)) => m,
             _ => unreachable!(),
         }
     }
 
     fn cur_function(&self) -> &FunctionBuilder<'a> {
-        match self.globals.last() {
-            Some(Some(GlobalValue::Function(m))) => m,
+        match self.globals[self.cur_function].value {
+            Some(GlobalValue::Function(ref m)) => m,
             _ => unreachable!(),
         }
     }
@@ -407,45 +451,60 @@ impl<'a> IrBuilder<'a> {
     }
 
     fn intern_string(&mut self, s: &str) -> Rc<str> {
-        if let Some(s) = self.strings.get(s) {
-            return s.clone();
-        }
-        let s: Rc<str> = Rc::from(s);
-        self.strings.insert(s.clone());
-        s
+        self.strings.intern(s)
     }
 
     fn new_vtable(
+        strings: &mut StringSet,
         globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
-        globals: &mut IndexVec<GlobalId, Option<GlobalValue<'a>>>,
+        globals: &mut IndexVec<GlobalId, Global<'a>>,
         ty: TypeId,
+        class_name: &'a str,
         vtable: Box<[GlobalId]>,
     ) -> GlobalId {
-        let len = globals.len();
-        assert!(len < u32::MAX as usize);
-        let id = GlobalId(len as u32);
-        globals_map.insert((ty, "Table"), id);
-        globals.push(Some(GlobalValue::Vtable(InstrKind::Vtable(id, vtable))));
-        id
+        use std::collections::hash_map::Entry;
+
+        match globals_map.entry((ty, "Table")) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let len = globals.len();
+                assert!(len < u32::MAX as usize);
+                let id = GlobalId(len as u32);
+                entry.insert(id);
+                let name = format!("{}.Table", class_name);
+                let global = Global {
+                    name:  strings.intern(&name),
+                    value: Some(GlobalValue::Vtable(InstrKind::Vtable(id, vtable))),
+                };
+                globals.push(global);
+                id
+            }
+        }
     }
 
     fn new_function(
+        strings: &mut StringSet,
         globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
-        globals: &mut IndexVec<GlobalId, Option<GlobalValue<'a>>>,
+        globals: &mut IndexVec<GlobalId, Global<'a>>,
         ty: TypeId,
+        class_name: &'a str,
         name: &'a str,
     ) -> GlobalId {
         use std::collections::hash_map::Entry;
 
-        let len = globals_map.len();
-
         match globals_map.entry((ty, name)) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
+                let len = globals.len();
                 assert!(len < u32::MAX as usize);
                 let id = GlobalId(len as u32);
                 entry.insert(id);
-                globals.push(None);
+                let name = format!("{}.{}", class_name, name);
+                let global = Global {
+                    name:  strings.intern(&name),
+                    value: None,
+                };
+                globals.push(global);
                 id
             }
         }
@@ -453,7 +512,10 @@ impl<'a> IrBuilder<'a> {
 
     pub fn build_class(&mut self, class: TypedClass<'a>) {
         let TypedClass {
-            type_id, methods, ..
+            type_id,
+            methods,
+            attrs,
+            ..
         } = class;
 
         self.cur_class = type_id;
@@ -474,11 +536,16 @@ impl<'a> IrBuilder<'a> {
             cur_offset = *offset + ty.size_of();
         }
 
-        // self.build_new(type_id);
+        self.build_new(type_id, attrs);
 
         for method in methods.into_vec() {
             self.build_function(method, &class_attrs);
         }
+    }
+
+    fn build_new(&mut self, ty: TypeId, attrs: Box<[TypedAttribute<'a>]>) {
+        let _ = ty;
+        let _ = attrs;
     }
 
     fn build_function(
@@ -492,6 +559,7 @@ impl<'a> IrBuilder<'a> {
 
         let mut function = FunctionBuilder::new(self.cur_class);
         let function_id = *self.globals_map.get(&(self.cur_class, id)).unwrap();
+        self.cur_function = function_id;
         let mut function_params = vec![(self.cur_class.size_of(), function.new_tmp())];
         function_params.extend(params.iter().map(|f| (f.ty.size_of(), function.new_tmp())));
 
@@ -504,24 +572,46 @@ impl<'a> IrBuilder<'a> {
         function.push_instr(kind, TypeId::SelfType);
         function.set_params(params.iter().map(|f| (f.id, f.ty)));
         function.set_attrs(class_attrs);
-        self.globals.push(Some(GlobalValue::Function(function)));
+        self.globals[function_id].value = Some(GlobalValue::Function(function));
 
+        let ret_ty = typed_method.return_ty();
         let (body, ty) = self.build_expr(typed_method.take_body());
+        let body = self.build_maybe_cast(ret_ty, body, ty);
         let kind = InstrKind::Return(Value::Id(body));
         self.push_instr(kind, ty);
 
-        self.end_function()
+        let ret = self.end_function();
+
+        // for (id, global) in self.globals.iter() {
+        //     if let Some(GlobalValue::Vtable(InstrKind::Vtable(_, ref vtable))) = global.value {
+        //         println!("{:?}:", self.globals[id].name);
+        //         for &method in vtable {
+        //             println!("  {:?}", self.globals[method].name);
+        //         }
+        //     }
+        // }
+
+        ret
     }
 
-    fn build_maybe_cast(&mut self, ty: TypeId, expr: IrId, expr_ty: TypeId) -> Option<IrId> {
+    fn build_maybe_cast(&mut self, ty: TypeId, expr: IrId, expr_ty: TypeId) -> IrId {
         match expr_ty {
             TypeId::INT | TypeId::BOOL | TypeId::STRING if ty != expr_ty => {
                 let tmp = self.new_tmp();
-                let kind = InstrKind::AssignToObj(tmp, expr_ty, Value::Id(expr));
+                let function_id = self
+                    .globals_map
+                    .get(&(expr_ty, "Cast"))
+                    .map(|&id| IrId::Global(id))
+                    .unwrap();
+                let kind = InstrKind::AssignCall(
+                    tmp,
+                    function_id,
+                    Box::new([(expr_ty.size_of(), Value::Id(expr))]),
+                );
                 self.push_instr(kind, ty);
-                Some(tmp)
+                tmp
             }
-            _ => None,
+            _ => expr,
         }
     }
 
@@ -602,7 +692,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::Assign(id, expr) => {
                 let (expr, expr_ty) = self.build_expr(*expr);
-                let new_expr = self.build_maybe_cast(ty, expr, expr_ty).unwrap_or(expr);
+                let new_expr = self.build_maybe_cast(ty, expr, expr_ty);
                 let id = self.get_local(id);
                 let kind = InstrKind::Store(id, ty.size_of(), Value::Id(new_expr));
                 self.push_instr(kind, ty);
@@ -632,7 +722,7 @@ impl<'a> IrBuilder<'a> {
                         Some(expr) => {
                             let (expr, expr_ty) = self.build_expr(expr);
                             let id = self.push_local(id, ty);
-                            let expr = self.build_maybe_cast(ty, expr, expr_ty).unwrap_or(expr);
+                            let expr = self.build_maybe_cast(ty, expr, expr_ty);
                             let kind = InstrKind::Store(id, ty.size_of(), Value::Id(expr));
                             self.push_instr(kind, ty);
                         }
@@ -725,13 +815,13 @@ impl<'a> IrBuilder<'a> {
 
         let then_block = self.begin_block();
         let (then, then_ty) = self.build_expr(then);
-        let then = self.build_maybe_cast(ty, then, then_ty).unwrap_or(then);
+        let then = self.build_maybe_cast(ty, then, then_ty);
         let jmp_kind = InstrKind::Jmp(then_block);
         self.push_instr(jmp_kind, TypeId::SelfType);
 
         let else_block = self.begin_block();
         let (els, els_ty) = self.build_expr(els);
-        let els = self.build_maybe_cast(ty, els, els_ty).unwrap_or(els);
+        let els = self.build_maybe_cast(ty, els, els_ty);
 
         let end_block = self.begin_block();
         let tmp = self.new_tmp();
@@ -807,7 +897,7 @@ impl<'a> IrBuilder<'a> {
         let mut arg_ids = vec![(0, Value::Int(0))];
         for (arg, param) in args.into_vec().into_iter().zip(params) {
             let (arg, arg_ty) = self.build_expr(arg);
-            let arg = self.build_maybe_cast(param, arg, arg_ty).unwrap_or(arg);
+            let arg = self.build_maybe_cast(param, arg, arg_ty);
             arg_ids.push((param.size_of(), Value::Id(arg)));
         }
         arg_ids
@@ -832,6 +922,9 @@ impl<'a> IrBuilder<'a> {
         let mut args = self.build_args(args, function_params);
 
         let (expr, _) = self.build_expr(expr);
+        if expr_ty.needs_cast() {
+            todo!()
+        }
         args[0] = (expr_ty.size_of(), Value::Id(expr));
 
         let ptr = self.new_ptr("VTable", TypeId::INT);
@@ -878,7 +971,10 @@ impl<'a> IrBuilder<'a> {
 
         let mut args = self.build_args(args, function_params);
 
-        let (expr, _) = self.build_expr(expr);
+        let (expr, expr_ty) = self.build_expr(expr);
+        if expr_ty.needs_cast() {
+            todo!()
+        }
         args[0] = (ty.size_of(), Value::Id(expr));
 
         let tmp = self.new_tmp();

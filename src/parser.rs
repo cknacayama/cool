@@ -267,17 +267,7 @@ impl<'a> Parser<'a> {
             span,
         );
 
-        let new = Feature::new(
-            FeatureKind::Method {
-                id:        "new",
-                params:    Box::new([]),
-                return_ty: Type::Class(id),
-                body:      Expr::new(ExprKind::New(Type::Class(id)), span),
-            },
-            span,
-        );
-
-        vec![type_name, new]
+        vec![type_name]
     }
 
     fn parse_feature(&mut self) -> ParseResult<Feature<'a>> {
