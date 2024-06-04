@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     marker::PhantomData,
     ops::{Range, RangeFrom},
 };
@@ -8,10 +9,19 @@ pub trait Key: Copy {
     fn from_index(index: usize) -> Self;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IndexVec<K: Key, V> {
     values: Vec<V>,
     unused: PhantomData<K>,
+}
+
+impl<K: Key, V> Debug for IndexVec<K, V>
+where
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.values.iter()).finish()
+    }
 }
 
 impl<K: Key, V> IndexVec<K, V> {

@@ -104,6 +104,7 @@ pub enum Type<'a> {
 
 impl<'a> Type<'a> {
     const IO_CLASS: Type<'static> = Type::Class("IO");
+    const ALLOCATOR_CLASS: Type<'static> = Type::Class("Allocator");
 
     pub fn to_str(&self) -> &'a str {
         match self {
@@ -198,6 +199,7 @@ impl TypeId {
     pub const BOOL: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(3) }));
     pub const STRING: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
     pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
+    pub const ALLOCATOR: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(6) }));
 
     #[inline]
     pub const fn align(size: usize, alignment: usize) -> usize {
@@ -260,10 +262,6 @@ impl TypeId {
         self == TypeId::STRING
     }
 
-    pub fn is_io(self) -> bool {
-        self == TypeId::IO
-    }
-
     pub fn is_inheritable(self) -> bool {
         self == TypeId::OBJECT || self >= TypeId::IO
     }
@@ -298,6 +296,12 @@ impl TypeId {
     }
 }
 
+impl Default for TypeId {
+    fn default() -> Self {
+        Self::OBJECT
+    }
+}
+
 impl index_vec::Key for TypeId {
     fn to_index(self) -> usize {
         match self {
@@ -322,6 +326,7 @@ impl std::fmt::Display for TypeId {
             &TypeId::BOOL => write!(f, "Bool"),
             &TypeId::STRING => write!(f, "String"),
             &TypeId::IO => write!(f, "IO"),
+            &TypeId::ALLOCATOR => write!(f, "Allocator"),
             TypeId::Class(id) => write!(f, "Class{}", id.0),
         }
     }
@@ -368,11 +373,17 @@ impl<'a> MethodTypeData<'a> {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AttrData {
+    pub ty:  TypeId,
+    pub pos: usize,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ClassTypeData<'a> {
     id:      &'a str,
     parent:  Option<TypeId>,
-    attrs:   FxHashMap<&'a str, TypeId>,
+    attrs:   FxHashMap<&'a str, AttrData>,
     methods: FxHashMap<&'a str, MethodTypeData<'a>>,
     vtable:  Vec<(TypeId, &'a str)>,
 }
@@ -381,7 +392,7 @@ impl<'a> ClassTypeData<'a> {
     pub fn new(
         id: &'a str,
         parent: Option<TypeId>,
-        attrs: FxHashMap<&'a str, TypeId>,
+        attrs: FxHashMap<&'a str, AttrData>,
         methods: FxHashMap<&'a str, MethodTypeData<'a>>,
         vtable: Vec<(TypeId, &'a str)>,
     ) -> Result<Self, TypeErrorKind<'static>> {
@@ -408,7 +419,7 @@ impl<'a> ClassTypeData<'a> {
         self.parent
     }
 
-    pub fn attrs(&self) -> &FxHashMap<&'a str, TypeId> {
+    pub fn attrs(&self) -> &FxHashMap<&'a str, AttrData> {
         &self.attrs
     }
 
@@ -545,6 +556,17 @@ impl<'a> ClassEnv<'a> {
             builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
+        let allocator = ClassTypeData::new(
+            "Allocator",
+            Some(TypeId::OBJECT),
+            FxHashMap::default(),
+            builtin_method_map!(
+                ("alloc", [TypeId::INT], TypeId::OBJECT),
+                ("free", [TypeId::OBJECT], TypeId::SelfType),
+            ),
+            builtin_vtable!(TypeId::ALLOCATOR, ["alloc", "free"]),
+        )
+        .unwrap();
 
         let mut types = FxHashMap::default();
 
@@ -554,12 +576,14 @@ impl<'a> ClassEnv<'a> {
         types.insert(Type::String, TypeId::STRING);
         types.insert(Type::SelfType, TypeId::SelfType);
         types.insert(Type::IO_CLASS, TypeId::IO);
+        types.insert(Type::ALLOCATOR_CLASS, TypeId::ALLOCATOR);
 
         classes.push(object);
         classes.push(int);
         classes.push(bool_);
         classes.push(string);
         classes.push(io);
+        classes.push(allocator);
 
         debug_assert_eq!(classes.len(), types.len() - 1);
 
@@ -640,12 +664,24 @@ impl<'a> ClassEnv<'a> {
             builtin_vtable!(TypeId::IO, ["out_string", "out_int", "in_string", "in_int"]),
         )
         .unwrap();
+        let allocator = ClassTypeData::new(
+            "Allocator",
+            Some(TypeId::OBJECT),
+            FxHashMap::default(),
+            builtin_method_map!(
+                ("alloc", [TypeId::INT], TypeId::OBJECT),
+                ("free", [TypeId::OBJECT], TypeId::SelfType),
+            ),
+            builtin_vtable!(TypeId::ALLOCATOR, ["alloc", "free"]),
+        )
+        .unwrap();
 
         classes.push(object);
         classes.push(int);
         classes.push(bool_);
         classes.push(string);
         classes.push(io);
+        classes.push(allocator);
 
         Self { types, classes }
     }
@@ -773,7 +809,7 @@ impl<'a> ClassEnv<'a> {
 
     pub fn get_attribute(&self, ty: TypeId, attr: &'a str) -> Result<TypeId, TypeErrorKind<'a>> {
         match self.classes[ty].attrs.get(attr) {
-            Some(data) => Ok(*data),
+            Some(data) => Ok(data.ty),
             None => Err(TypeErrorKind::UndefinedObject(attr)),
         }
     }
@@ -785,7 +821,11 @@ impl<'a> ClassEnv<'a> {
         data: TypeId,
     ) -> Result<(), TypeErrorKind<'a>> {
         let class_data = &mut self.classes[ty];
-        match class_data.attrs.insert(attr, data) {
+        let attr_data = AttrData {
+            ty:  data,
+            pos: class_data.attrs.len(),
+        };
+        match class_data.attrs.insert(attr, attr_data) {
             Some(_) => Err(TypeErrorKind::RedefinedAttribute(ty, attr)),
             None => Ok(()),
         }
@@ -924,9 +964,11 @@ impl<'a> IClassEnv<'a> {
             IClassTypeData::new("Bool", Ok(Some(TypeId::OBJECT)), 1),
             IClassTypeData::new("String", Ok(Some(TypeId::OBJECT)), 1),
             IClassTypeData::new("IO", Ok(Some(TypeId::OBJECT)), 1),
+            IClassTypeData::new("Allocator", Ok(Some(TypeId::OBJECT)), 1),
         ];
         let children = index_vec![
             vec![TypeId::INT, TypeId::BOOL, TypeId::STRING, TypeId::IO],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -940,6 +982,7 @@ impl<'a> IClassEnv<'a> {
         types.insert(Type::String, TypeId::STRING);
         types.insert(Type::SelfType, TypeId::SelfType);
         types.insert(Type::IO_CLASS, TypeId::IO);
+        types.insert(Type::ALLOCATOR_CLASS, TypeId::ALLOCATOR);
 
         debug_assert_eq!(classes.len(), children.len());
         debug_assert_eq!(types.len() - 1, classes.len());

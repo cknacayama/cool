@@ -471,10 +471,10 @@ impl<'a> TypedMethod<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedAttribute<'a> {
-    id:   &'a str,
-    ty:   TypeId,
-    init: Option<TypedExpr<'a>>,
-    span: Span,
+    pub id:   &'a str,
+    pub ty:   TypeId,
+    pub init: Option<TypedExpr<'a>>,
+    span:     Span,
 }
 
 impl<'a> TypedAttribute<'a> {

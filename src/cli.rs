@@ -1,8 +1,9 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, rc::Rc};
 
 use crate::{
     checker::{MultiPassChecker, SemanticError, TypeChecker},
-    ir::{builder::IrBuilder, opt::IrOptmizer},
+    index_vec::IndexVec,
+    ir::{builder::IrBuilder, opt::IrOptmizer, GlobalId, InstrKind},
     lexer::Lexer,
     parser::Parser,
 };
@@ -171,11 +172,11 @@ impl Config {
                 for function in ir_builder.functions_mut() {
                     function.set_labels();
                 }
-                let mut output = String::new();
-                for ir in ir_builder.instrs() {
-                    output.push_str(&format!("{}\n", ir));
-                }
-                Ok(output)
+                let globals = ir_builder
+                    .globals_names()
+                    .map(|(id, name)| (id, name.clone()))
+                    .collect();
+                Ok(ir_output(ir_builder.instrs(), &globals))
             }
             Mode::Opt => {
                 let checker = MultiPassChecker::from_input(&self.input)?;
@@ -186,11 +187,7 @@ impl Config {
                 }
                 let mut ir_opt = IrOptmizer::from_builder(ir_builder);
                 ir_opt.optimize();
-                let mut output = String::new();
-                for ir in ir_opt.instrs() {
-                    output.push_str(&format!("{}\n", ir));
-                }
-                Ok(output)
+                Ok(ir_output(ir_opt.instrs(), ir_opt.globals()))
             }
             Mode::Asm => todo!(),
         }
@@ -211,4 +208,16 @@ impl Config {
         }
         std::process::exit(1);
     }
+}
+
+fn ir_output<'a, T>(instrs: T, globals: &IndexVec<GlobalId, Rc<str>>) -> String
+where
+    T: IntoIterator<Item = &'a InstrKind>,
+{
+    let mut output = String::new();
+    for instr in instrs {
+        output.push_str(&instr.to_ir_string(globals));
+        output.push('\n');
+    }
+    output
 }

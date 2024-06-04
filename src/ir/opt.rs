@@ -561,8 +561,10 @@ impl FunctionOptmizer {
 
         for block_id in self.block_ids() {
             for instr in self.instrs_block(block_id) {
-                if let InstrKind::Store(local, _, _) = instr.kind {
-                    stores[local.local_id().unwrap()].1.push(block_id);
+                if let InstrKind::Store { dst, .. } = instr.kind {
+                    if let Some(dst) = dst.local_id() {
+                        stores[dst].1.push(block_id);
+                    }
                 }
             }
         }
@@ -874,22 +876,22 @@ impl InstrKind {
                 }
             }
 
-            Self::Store(id1, _, id2) if id1.is_ptr() => {
-                let cur_id1 = renames.get(id1).unwrap().last().unwrap();
-                *id1 = *cur_id1;
+            Self::Store { dst, src, .. } if dst.is_ptr() => {
+                let cur_id1 = renames.get(dst).unwrap().last().unwrap();
+                *dst = *cur_id1;
                 update_var_uses(uses, cur_id1, instr_id);
-                if let Value::Id(id2) = id2 {
+                if let Value::Id(id2) = src {
                     let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
                     update_var_uses(uses, cur_id2, instr_id);
                 }
             }
 
-            Self::Store(id1, _, val) => match val {
+            Self::Store { dst, src, .. } => match src {
                 Value::Id(id) => {
                     let cur_id = *renames.get(id).unwrap().last().unwrap();
                     let new_id = tmp.next_mut();
-                    let old_id = *id1;
+                    let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
                     *self = Self::Assign(new_id, Value::Id(cur_id));
                     update_var_uses(uses, &cur_id, instr_id);
@@ -898,7 +900,7 @@ impl InstrKind {
                 }
                 val => {
                     let new_id = tmp.next_mut();
-                    let old_id = *id1;
+                    let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
                     let val = std::mem::take(val);
                     *self = Self::Assign(new_id, val);
@@ -930,6 +932,26 @@ impl InstrKind {
                 return Some(old_id);
             }
 
+            Self::AssignInsert {
+                dst,
+                src,
+                val: Value::Id(val),
+                ..
+            } if !val.is_global() => {
+                let cur_src = renames.get(src).unwrap().last().unwrap();
+                *src = *cur_src;
+                update_var_uses(uses, cur_src, instr_id);
+                let cur_val = renames.get(val).unwrap().last().unwrap();
+                *val = *cur_val;
+                update_var_uses(uses, cur_val, instr_id);
+                let new_id = tmp.next_mut();
+                let old_id = *dst;
+                renames.entry(old_id).or_default().push(new_id);
+                *dst = new_id;
+                update_var_use_decl(uses, new_id, instr_id);
+                return Some(old_id);
+            }
+
             Self::AssignBin {
                 dst,
                 lhs: Value::Id(lhs),
@@ -957,6 +979,7 @@ impl InstrKind {
                 lhs: Value::Id(src),
                 ..
             }
+            | Self::AssignInsert { dst, src, .. }
             | Self::AssignBin {
                 dst,
                 rhs: Value::Id(src),
@@ -1091,6 +1114,10 @@ impl InstrKind {
                 Self::try_replace_id(values, id);
                 None
             }
+            InstrKind::AssignInsert { val, .. } => {
+                Self::try_replace(values, val);
+                None
+            }
             InstrKind::Phi(_, vals) => {
                 for (val, _) in vals.iter_mut() {
                     Self::try_replace(values, val);
@@ -1101,8 +1128,8 @@ impl InstrKind {
                 Self::try_replace(values, id);
                 None
             }
-            InstrKind::Store(_, _, val) => {
-                Self::try_replace(values, val);
+            InstrKind::Store { src, .. } => {
+                Self::try_replace(values, src);
                 None
             }
             InstrKind::AssignLoad { src, .. } => {
@@ -1261,6 +1288,10 @@ impl IrOptmizer {
             vtables,
             globals,
         }
+    }
+
+    pub fn globals(&self) -> &IndexVec<GlobalId, Rc<str>> {
+        &self.globals
     }
 
     pub fn functions_mut(&mut self) -> impl Iterator<Item = &mut FunctionOptmizer> {

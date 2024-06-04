@@ -2,7 +2,7 @@ use std::{fmt, rc::Rc};
 
 use crate::{
     ast::{BinOp, UnOp},
-    index_vec::Key,
+    index_vec::{IndexVec, Key},
     types::TypeId,
 };
 
@@ -24,13 +24,14 @@ pub enum Value {
 }
 
 impl fmt::Display for Value {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Void => write!(f, "void"),
+            Value::Void => write!(f, "$void"),
             Value::Id(id) => write!(f, "{}", id),
-            Value::Int(val) => write!(f, "{}", val),
-            Value::Bool(val) => write!(f, "{}", val),
-            Value::Str(val) => write!(f, "{:?}", val),
+            Value::Int(val) => write!(f, "${}", val),
+            Value::Bool(val) => write!(f, "${}", val),
+            Value::Str(val) => write!(f, "${:?}", val),
         }
     }
 }
@@ -69,6 +70,12 @@ pub enum InstrKind {
     },
     AssignCall(IrId, IrId, Box<[(usize, Value)]>),
     AssignExtract(IrId, IrId, usize),
+    AssignInsert {
+        dst: IrId,
+        src: IrId,
+        val: Value,
+        idx: usize,
+    },
     Phi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
@@ -80,7 +87,11 @@ pub enum InstrKind {
         src:    IrId,
         offset: usize,
     },
-    Store(IrId, usize, Value),
+    Store {
+        dst:  IrId,
+        size: usize,
+        src:  Value,
+    },
 }
 
 impl InstrKind {
@@ -120,20 +131,26 @@ impl InstrKind {
                 }
             }
 
-            Self::Store(_, _, val) => {
-                if let Value::Id(id) = val {
-                    (None, Some([*id].into()))
+            Self::Store { dst, src, .. } => {
+                if let Value::Id(id) = src {
+                    (None, Some([*dst, *id].into()))
                 } else {
-                    (None, None)
+                    (None, Some([*dst].into()))
                 }
             }
 
             Self::AssignBin {
                 dst,
-                lhs: Value::Id(lhs),
-                rhs: Value::Id(rhs),
+                lhs: Value::Id(src1),
+                rhs: Value::Id(src2),
                 ..
-            } => (Some(*dst), Some([*lhs, *rhs].into())),
+            }
+            | Self::AssignInsert {
+                dst,
+                src: src1,
+                val: Value::Id(src2),
+                ..
+            } => (Some(*dst), Some([*src1, *src2].into())),
 
             Self::AssignBin {
                 dst,
@@ -145,6 +162,7 @@ impl InstrKind {
                 rhs: Value::Id(src),
                 ..
             }
+            | Self::AssignInsert { dst, src, .. }
             | Self::AssignUn { dst, src, .. }
             | Self::Assign(dst, Value::Id(src))
             | Self::AssignLoad { dst, src, .. }
@@ -199,7 +217,7 @@ impl fmt::Display for InstrKind {
                 write!(f, "]")
             }
             InstrKind::Function { id, ret, params } => {
-                write!(f, "function {} {}(", id, ret)?;
+                write!(f, "fn {} {}(", ret, id)?;
                 for (i, (ty, id)) in params.iter().enumerate() {
                     write!(f, "{} {}", ty, id)?;
                     if i != params.len() - 1 {
@@ -238,6 +256,9 @@ impl fmt::Display for InstrKind {
             InstrKind::AssignExtract(id, obj, index) => {
                 write!(f, "    {} = extract {}, {}", id, obj, index)
             }
+            InstrKind::AssignInsert { dst, src, val, idx } => {
+                write!(f, "    {} = insert {}, {}, {}", dst, src, val, idx)
+            }
             InstrKind::Phi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
                 for (i, (val, block)) in vals.iter().enumerate() {
@@ -257,7 +278,9 @@ impl fmt::Display for InstrKind {
             } => {
                 write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
             }
-            InstrKind::Store(name, ty, id) => write!(f, "    store {}, {} {}", name, ty, id),
+            InstrKind::Store { dst, size, src } => {
+                write!(f, "    store {}, {} {}", dst, size, src)
+            }
         }
     }
 }
@@ -360,6 +383,7 @@ impl IrId {
 }
 
 impl fmt::Display for IrId {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tmp(subs) => write!(f, "%{}", subs),
@@ -400,5 +424,144 @@ impl Key for GlobalId {
 
     fn from_index(index: usize) -> Self {
         Self(index as u32)
+    }
+}
+
+impl IrId {
+    #[inline]
+    pub fn to_ir_string(self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
+        match self {
+            Self::Global(id) => format!("@{}", globals[id]),
+            _ => format!("{}", self),
+        }
+    }
+}
+
+impl Value {
+    #[inline]
+    pub fn to_ir_string(&self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
+        match self {
+            Value::Id(id) => id.to_ir_string(globals),
+            _ => format!("{}", self),
+        }
+    }
+}
+
+impl InstrKind {
+    pub fn to_ir_string(&self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
+        match self {
+            InstrKind::Nop => format!("    nop"),
+            InstrKind::Vtable(dst, ids) => {
+                let mut s = format!("@{} = [", globals[*dst]);
+                for (i, id) in ids.iter().enumerate() {
+                    s.push_str(&format!("@{}", globals[*id]));
+                    if i != ids.len() - 1 {
+                        s.push_str(&format!(", "));
+                    }
+                }
+                s.push_str(&format!("]"));
+                s
+            }
+            InstrKind::Function { id, ret, params } => {
+                let mut s = format!("fn {} {}(", ret, id.to_ir_string(globals));
+                for (i, (ty, id)) in params.iter().enumerate() {
+                    s.push_str(&format!("{} {}", ty, id.to_ir_string(globals)));
+                    if i != params.len() - 1 {
+                        s.push_str(&format!(", "));
+                    }
+                }
+                s.push_str(&format!(") {{"));
+                s
+            }
+            InstrKind::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),
+            InstrKind::Label(subs) => format!("block{}:", subs),
+            InstrKind::Jmp(subs) => format!("    jmp block{}", subs),
+            InstrKind::JmpCond {
+                src,
+                on_true,
+                on_false,
+            } => {
+                format!(
+                    "    {}  block{} : block{}",
+                    src.to_ir_string(globals),
+                    on_true,
+                    on_false
+                )
+            }
+            InstrKind::Assign(id, val) => format!("    {} = {}", id, val.to_ir_string(globals)),
+            InstrKind::AssignBin { op, dst, lhs, rhs } => {
+                format!(
+                    "    {} = {} {}, {}",
+                    dst,
+                    op.to_ir_string(),
+                    lhs.to_ir_string(globals),
+                    rhs.to_ir_string(globals)
+                )
+            }
+            InstrKind::AssignUn { op, dst, src } => {
+                format!(
+                    "    {} = {} {}",
+                    dst,
+                    op.to_ir_string(),
+                    src.to_ir_string(globals)
+                )
+            }
+            InstrKind::AssignCall(id, func, args) => {
+                let mut s = format!("    {} = call {}(", id, func.to_ir_string(globals));
+                for (i, arg) in args.iter().enumerate() {
+                    s.push_str(&format!("{} {}", arg.0, arg.1.to_ir_string(globals)));
+                    if i != args.len() - 1 {
+                        s.push_str(&format!(", "));
+                    }
+                }
+                s.push_str(&format!(")"));
+                s
+            }
+            InstrKind::AssignExtract(id, obj, index) => {
+                format!(
+                    "    {} = extract {}, {}",
+                    id,
+                    obj.to_ir_string(globals),
+                    index
+                )
+            }
+            InstrKind::AssignInsert { dst, src, val, idx } => {
+                format!(
+                    "    {} = insert {}, {}, {}",
+                    dst,
+                    src.to_ir_string(globals),
+                    val.to_ir_string(globals),
+                    idx
+                )
+            }
+            InstrKind::Phi(id, vals) => {
+                let mut s = format!("    {} = phi ", id);
+                for (i, (val, block)) in vals.iter().enumerate() {
+                    s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
+                    if i != vals.len() - 1 {
+                        s.push_str(&format!(", "));
+                    }
+                }
+                s
+            }
+            InstrKind::Local(ty, name) => format!("    local {} {}", ty, name),
+            InstrKind::AssignLoad {
+                dst,
+                size,
+                src,
+                offset,
+            } => {
+                format!(
+                    "    {} = load {} {}, {}",
+                    dst,
+                    size,
+                    src.to_ir_string(globals),
+                    offset
+                )
+            }
+            InstrKind::Store { dst, size, src } => {
+                format!("    store {}, {} {}", dst.to_ir_string(globals), size, src)
+            }
+        }
     }
 }
