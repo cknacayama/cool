@@ -1131,7 +1131,7 @@ mod tests {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            vec![],
+            Vec::new(),
         )
         .unwrap();
         let b_data = ClassTypeData::new(
@@ -1139,7 +1139,7 @@ mod tests {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             FxHashMap::default(),
-            vec![],
+            Vec::new(),
         )
         .unwrap();
         let a = env.insert_class(a, a_data).unwrap();
@@ -1150,7 +1150,7 @@ mod tests {
             Some(a),
             FxHashMap::default(),
             FxHashMap::default(),
-            vec![],
+            Vec::new(),
         )
         .unwrap();
         let c = env.insert_class(c, c_data).unwrap();
@@ -1160,7 +1160,7 @@ mod tests {
             Some(b),
             FxHashMap::default(),
             FxHashMap::default(),
-            vec![],
+            Vec::new(),
         )
         .unwrap();
         let e_data = ClassTypeData::new(
@@ -1168,7 +1168,7 @@ mod tests {
             Some(c),
             FxHashMap::default(),
             FxHashMap::default(),
-            vec![],
+            Vec::new(),
         )
         .unwrap();
         let d = env.insert_class(d, d_data).unwrap();

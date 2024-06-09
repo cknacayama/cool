@@ -13,12 +13,13 @@ use super::{
     GlobalId, Instr, InstrKind, IrId, LocalId, Value,
 };
 
-type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
-type ImmediateDominators = IndexVec<BlockId, BlockId>;
-type DominatorTree = IndexVec<BlockId, Vec<BlockId>>;
-type Dominated = IndexVec<BlockId, Vec<BlockId>>;
-type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
-type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
+pub type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
+pub type Successors = IndexVec<BlockId, Vec<BlockId>>;
+pub type ImmediateDominators = IndexVec<BlockId, BlockId>;
+pub type DominatorTree = IndexVec<BlockId, Vec<BlockId>>;
+pub type Dominated = IndexVec<BlockId, FxHashSet<BlockId>>;
+pub type DominanceFrontiers = IndexVec<BlockId, Vec<BlockId>>;
+pub type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]>, TypeId)>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstrId(usize);
@@ -62,21 +63,29 @@ impl VarUses {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockData {
     start: InstrId,
     end:   InstrId,
     id:    BlockId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     instrs: IndexVec<InstrId, Instr>,
     blocks: IndexVec<BlockId, BlockData>,
 }
 
 impl Function {
-    fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
+    pub fn blocks(&self) -> &IndexVec<BlockId, BlockData> {
+        &self.blocks
+    }
+
+    pub fn instrs(&self) -> &IndexVec<InstrId, Instr> {
+        &self.instrs
+    }
+
+    pub fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
         let BlockData { end, .. } = self.blocks[block];
 
         let block_end = end.prev();
@@ -94,6 +103,16 @@ impl Function {
             InstrKind::Return(_) => {}
             _ => unreachable!(),
         }
+    }
+
+    fn predecessors(&self) -> Predecessors {
+        let mut preds = index_vec![vec![]; self.blocks.len()];
+
+        for bb in self.blocks.indices() {
+            self.successors_visit(bb, |succ| preds[succ].push(bb));
+        }
+
+        preds
     }
 
     fn rename_phi_arg(
@@ -201,8 +220,6 @@ impl FunctionOptmizer {
 
         let mut instrs = IndexVec::new();
         let mut blocks = IndexVec::with_capacity(builder.blocks.len());
-        let mut idoms = IndexVec::with_capacity(blocks.len());
-        let mut dom_tree = IndexVec::with_capacity(blocks.len());
 
         for block in builder.blocks.into_inner() {
             let start = instrs.len();
@@ -214,14 +231,14 @@ impl FunctionOptmizer {
                 id:    block.id,
             };
             blocks.push(block_data);
-            idoms.push(block.idom.unwrap_or(BlockId::ENTRY));
-            dom_tree.push(block.doms);
         }
 
+        let function = Function { instrs, blocks };
+
         Self {
-            function: Function { instrs, blocks },
-            idoms,
-            dom_tree,
+            function,
+            idoms: builder.idoms,
+            dom_tree: builder.dom_tree,
             locals: builder.locals,
         }
     }
@@ -262,7 +279,7 @@ impl FunctionOptmizer {
         phis.iter().map(|(_, phis)| phis.len()).sum()
     }
 
-    pub fn optimize(&mut self) {
+    pub fn optimize(&mut self) -> FxHashMap<IrId, VarUses> {
         let preds = self.predecessors();
         let dom_frontiers = self.dominance_frontiers(&preds);
         let phis = self.phi_positions(&preds, &dom_frontiers);
@@ -272,19 +289,23 @@ impl FunctionOptmizer {
         while self.const_propagation(&mut uses) | self.dead_code_elimination(&mut uses) {}
 
         self.try_merge_blocks();
+
+        uses
     }
 
     fn can_merge(&self, block: BlockId) -> bool {
-        self.instrs_block(block).iter().all(|instr| {
-            matches!(
-                instr.kind,
+        self.instrs_block(block)
+            .iter()
+            .all(|instr| match instr.kind {
                 InstrKind::Label(_)
-                    | InstrKind::Jmp(_)
-                    | InstrKind::Nop
-                    | InstrKind::Return(_)
-                    | InstrKind::Function { .. }
-            )
-        })
+                | InstrKind::Nop
+                | InstrKind::Return(_)
+                | InstrKind::Function { .. } => true,
+
+                InstrKind::Jmp(target) => target == block.next(),
+
+                _ => false,
+            })
     }
 
     fn try_merge_blocks(&mut self) {
@@ -347,13 +368,7 @@ impl FunctionOptmizer {
     }
 
     fn predecessors(&self) -> Predecessors {
-        let mut preds = index_vec![vec![]; self.blocks_count()];
-
-        for bb in self.block_ids() {
-            self.successors_visit(bb, |succ| preds[succ].push(bb));
-        }
-
-        preds
+        self.function.predecessors()
     }
 
     fn reachability_blocks(&self) -> IndexVec<BlockId, bool> {
@@ -478,33 +493,13 @@ impl FunctionOptmizer {
     }
 
     pub fn dominators(&self, doms: &Dominated) -> (ImmediateDominators, DominatorTree) {
-        let mut idoms = index_vec![BlockId::ENTRY; self.blocks_count()];
-        let mut dom_tree = index_vec![vec![]; self.blocks_count()];
-
-        for dom in self.block_ids().skip(1) {
-            for block in doms[dom]
-                .iter()
-                .filter_map(|&d| if d != dom { Some(d) } else { None })
-            {
-                if self.block_ids().all(|other| {
-                    if other == block || other == dom || !doms[other].contains(&block) {
-                        true
-                    } else {
-                        doms[other].contains(&dom)
-                    }
-                }) {
-                    idoms[block] = dom;
-                    dom_tree[dom].push(block);
-                }
-            }
-        }
-
-        (idoms, dom_tree)
+        let _ = doms;
+        todo!()
     }
 
     pub fn dominated_blocks(&self) -> Dominated {
         let mut dom_tree = IndexVec::with_capacity(self.blocks_count());
-        dom_tree.push(self.block_ids().collect::<Vec<_>>());
+        dom_tree.push(self.block_ids().collect());
 
         for block in self.block_ids().skip(1) {
             let mut visited = index_vec![false; self.blocks_count()];
@@ -521,11 +516,7 @@ impl FunctionOptmizer {
                 });
             }
 
-            dom_tree.push(
-                self.block_ids()
-                    .filter(|bb| !visited[*bb])
-                    .collect::<Vec<_>>(),
-            );
+            dom_tree.push(self.block_ids().filter(|bb| !visited[*bb]).collect());
         }
 
         dom_tree
@@ -796,7 +787,6 @@ impl FunctionOptmizer {
             }
         }) {
             res = true;
-
             let VarUses { decl, .. } = uses.remove(&id).unwrap();
             self.instrs_mut()[decl].kind.replace_with_nop();
             for uses in uses.values_mut() {
@@ -1299,9 +1289,9 @@ impl IrOptmizer {
     }
 
     pub fn optimize(&mut self) {
-        self.functions
-            .iter_mut()
-            .for_each(|function| function.optimize())
+        for function in self.functions.iter_mut() {
+            function.optimize();
+        }
     }
 
     fn instrs_with_nops(&self) -> impl Iterator<Item = &InstrKind> {

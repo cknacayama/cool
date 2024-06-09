@@ -43,21 +43,21 @@ impl std::fmt::Display for BlockId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block {
     pub id:     BlockId,
-    pub idom:   Option<BlockId>,
     pub instrs: VecDeque<Instr>,
-    pub doms:   Vec<BlockId>,
+    pub preds:  Vec<BlockId>,
+    pub succs:  Vec<BlockId>,
 }
 
 impl Block {
     pub fn new(id: BlockId) -> Self {
         Self {
             id,
-            idom: None,
             instrs: VecDeque::new(),
-            doms: vec![],
+            preds: Vec::new(),
+            succs: Vec::new(),
         }
     }
 

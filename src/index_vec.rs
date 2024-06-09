@@ -1,7 +1,8 @@
 use std::{
     fmt::Debug,
     marker::PhantomData,
-    ops::{Range, RangeFrom},
+    ops::{Range, RangeBounds, RangeFrom},
+    vec::Drain,
 };
 
 pub trait Key: Copy {
@@ -27,7 +28,7 @@ where
 impl<K: Key, V> IndexVec<K, V> {
     pub fn new() -> Self {
         Self {
-            values: vec![],
+            values: Vec::new(),
             unused: PhantomData,
         }
     }
@@ -51,6 +52,17 @@ impl<K: Key, V> IndexVec<K, V> {
         self.values.capacity()
     }
 
+    pub fn reverse(&mut self) {
+        self.values.reverse()
+    }
+
+    pub fn drain<R>(&mut self, range: R) -> Drain<V>
+    where
+        R: RangeBounds<usize>,
+    {
+        self.values.drain(range)
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -60,11 +72,15 @@ impl<K: Key, V> IndexVec<K, V> {
     }
 
     pub fn push(&mut self, value: V) {
-        self.values.push(value);
+        self.values.push(value)
+    }
+
+    pub fn pop(&mut self) -> Option<V> {
+        self.values.pop()
     }
 
     pub fn insert(&mut self, key: K, value: V) {
-        self.values.insert(key.to_index(), value);
+        self.values.insert(key.to_index(), value)
     }
 
     pub fn get(&self, key: K) -> Option<&V> {
@@ -276,7 +292,7 @@ impl Key for u32 {
 
 macro_rules! index_vec {
     () => (
-        IndexVec::from(vec![])
+        IndexVec::new()
     );
     ($elem:expr; $n:expr) => (
         IndexVec::from(vec![$elem; $n])

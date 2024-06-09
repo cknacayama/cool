@@ -107,6 +107,10 @@ impl InstrKind {
         matches!(self, Self::Nop)
     }
 
+    pub fn is_phi(&self) -> bool {
+        matches!(self, Self::Phi(_, _))
+    }
+
     pub fn uses(&self) -> (Option<IrId>, Option<Box<[IrId]>>) {
         match self {
             Self::Nop | Self::Label(_) | Self::Jmp(_) => (None, None),
@@ -450,16 +454,16 @@ impl Value {
 impl InstrKind {
     pub fn to_ir_string(&self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
         match self {
-            InstrKind::Nop => format!("    nop"),
+            InstrKind::Nop => "    nop".to_string(),
             InstrKind::Vtable(dst, ids) => {
                 let mut s = format!("@{} = [", globals[*dst]);
                 for (i, id) in ids.iter().enumerate() {
                     s.push_str(&format!("@{}", globals[*id]));
                     if i != ids.len() - 1 {
-                        s.push_str(&format!(", "));
+                        s.push_str(", ");
                     }
                 }
-                s.push_str(&format!("]"));
+                s.push(']');
                 s
             }
             InstrKind::Function { id, ret, params } => {
@@ -467,10 +471,10 @@ impl InstrKind {
                 for (i, (ty, id)) in params.iter().enumerate() {
                     s.push_str(&format!("{} {}", ty, id.to_ir_string(globals)));
                     if i != params.len() - 1 {
-                        s.push_str(&format!(", "));
+                        s.push_str(", ");
                     }
                 }
-                s.push_str(&format!(") {{"));
+                s.push_str(") {{");
                 s
             }
             InstrKind::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),
@@ -482,7 +486,7 @@ impl InstrKind {
                 on_false,
             } => {
                 format!(
-                    "    {}  block{} : block{}",
+                    "    {} ? block{} : block{}",
                     src.to_ir_string(globals),
                     on_true,
                     on_false
@@ -511,10 +515,10 @@ impl InstrKind {
                 for (i, arg) in args.iter().enumerate() {
                     s.push_str(&format!("{} {}", arg.0, arg.1.to_ir_string(globals)));
                     if i != args.len() - 1 {
-                        s.push_str(&format!(", "));
+                        s.push_str(", ");
                     }
                 }
-                s.push_str(&format!(")"));
+                s.push(')');
                 s
             }
             InstrKind::AssignExtract(id, obj, index) => {
@@ -539,7 +543,7 @@ impl InstrKind {
                 for (i, (val, block)) in vals.iter().enumerate() {
                     s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
                     if i != vals.len() - 1 {
-                        s.push_str(&format!(", "));
+                        s.push_str(", ");
                     }
                 }
                 s

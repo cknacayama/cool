@@ -35,12 +35,14 @@ impl StringSet {
 
 #[derive(Debug)]
 pub struct FunctionBuilder<'a> {
-    class:             TypeId,
-    pub(super) blocks: IndexVec<BlockId, Block>,
-    cur_locals:        Vec<FxHashMap<&'a str, IrId>>,
-    pub(super) locals: IndexVec<LocalId, (TypeId, BlockId)>,
-    cur_tmp:           u32,
-    is_in_new:         bool,
+    class:               TypeId,
+    pub(super) blocks:   IndexVec<BlockId, Block>,
+    cur_locals:          Vec<FxHashMap<&'a str, IrId>>,
+    pub(super) locals:   IndexVec<LocalId, (TypeId, BlockId)>,
+    cur_tmp:             u32,
+    is_in_new:           bool,
+    pub(super) idoms:    IndexVec<BlockId, BlockId>,
+    pub(super) dom_tree: IndexVec<BlockId, Vec<BlockId>>,
 }
 
 impl<'a> FunctionBuilder<'a> {
@@ -52,6 +54,8 @@ impl<'a> FunctionBuilder<'a> {
             cur_locals: Vec::new(),
             locals: IndexVec::new(),
             is_in_new: false,
+            idoms: index_vec![BlockId::ENTRY],
+            dom_tree: index_vec![Vec::new()],
         }
     }
 
@@ -116,8 +120,13 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     fn set_dom(&mut self, idom: BlockId, block: BlockId) {
-        self.blocks[block].idom = Some(idom);
-        self.blocks[idom].doms.push(block);
+        self.idoms[block] = idom;
+        self.dom_tree[idom].push(block);
+    }
+
+    fn set_pred(&mut self, block: BlockId, pred: BlockId) {
+        self.blocks[block].preds.push(pred);
+        self.blocks[pred].succs.push(block);
     }
 
     fn cur_scope_mut(&mut self) -> &mut FxHashMap<&'a str, IrId> {
@@ -141,10 +150,17 @@ impl<'a> FunctionBuilder<'a> {
         assert!(self.cur_locals.len() < u32::MAX as usize);
         let id = BlockId(self.blocks.len() as u32);
         let block = Block::new(id);
-        if !self.last_instr().kind.is_block_end() {
+        let inserted_jmp = !self.last_instr().kind.is_block_end();
+        if inserted_jmp {
             self.push_instr(InstrKind::Jmp(id), TypeId::SelfType);
         }
+        let cur_block = self.cur_block();
         self.blocks.push(block);
+        self.idoms.push(BlockId::ENTRY);
+        self.dom_tree.push(Vec::new());
+        if inserted_jmp {
+            self.set_pred(id, cur_block);
+        }
         id
     }
 
@@ -161,6 +177,9 @@ impl<'a> FunctionBuilder<'a> {
             _ => unreachable!(),
         }
 
+        self.set_pred(on_true, block);
+        self.set_pred(on_false, block);
+
         self.set_dom(block, on_true);
         self.set_dom(block, on_false);
     }
@@ -173,6 +192,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             _ => unreachable!(),
         }
+        self.set_pred(target, block);
     }
 
     fn new_tmp(&mut self) -> IrId {
@@ -477,6 +497,10 @@ impl<'a> IrBuilder<'a> {
 
     fn set_dom(&mut self, idom: BlockId, block: BlockId) {
         self.cur_function_mut().set_dom(idom, block)
+    }
+
+    fn set_pred(&mut self, block: BlockId, pred: BlockId) {
+        self.cur_function_mut().set_pred(block, pred)
     }
 
     fn intern_string(&mut self, s: &str) -> Rc<str> {
@@ -911,6 +935,7 @@ impl<'a> IrBuilder<'a> {
         self.set_dom(cur_block, cond_block);
 
         let (cond, _) = self.build_expr(cond);
+        let cond_end_block = self.cur_block();
         let jmp_0_kind = InstrKind::JmpCond {
             src:      cond,
             on_true:  cond_block,
@@ -920,14 +945,16 @@ impl<'a> IrBuilder<'a> {
 
         let body_block = self.begin_block();
         let _ = self.build_expr(body);
+
         let jmp_kind = InstrKind::Jmp(cond_block);
         self.push_instr(jmp_kind, TypeId::SelfType);
+        self.set_pred(cond_block, self.cur_block());
 
         let end_block = self.begin_block();
         let tmp = self.new_tmp();
         let kind = InstrKind::Assign(tmp, Value::Void);
         self.push_instr(kind, TypeId::OBJECT);
-        self.patch_jmp_cond(cond_block, body_block, end_block);
+        self.patch_jmp_cond(cond_end_block, body_block, end_block);
         (tmp, TypeId::OBJECT)
     }
 
@@ -953,6 +980,7 @@ impl<'a> IrBuilder<'a> {
         let then = self.build_maybe_cast(ty, then, then_ty);
         let jmp_kind = InstrKind::Jmp(then_block);
         self.push_instr(jmp_kind, TypeId::SelfType);
+        let then_end_block = self.cur_block();
 
         let else_block = self.begin_block();
         let (els, els_ty) = self.build_expr(els);
@@ -966,7 +994,7 @@ impl<'a> IrBuilder<'a> {
         );
         self.push_instr(kind, ty);
         self.patch_jmp_cond(cond_block, then_block, else_block);
-        self.patch_jmp(then_block, end_block);
+        self.patch_jmp(then_end_block, end_block);
         self.set_dom(cond_block, end_block);
 
         (tmp, ty)
