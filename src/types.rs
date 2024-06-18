@@ -3,7 +3,7 @@ use std::{cmp::Ordering, num::NonZeroU32};
 use crate::{
     ast::Class,
     fxhash::{FxHashMap, FxHashSet},
-    index_vec::{self, index_vec, IndexVec, Key},
+    index_vec::{self, index_vec, Idx, IndexVec},
     span::Span,
 };
 
@@ -302,15 +302,15 @@ impl Default for TypeId {
     }
 }
 
-impl index_vec::Key for TypeId {
-    fn to_index(self) -> usize {
+impl index_vec::Idx for TypeId {
+    fn index(self) -> usize {
         match self {
             TypeId::Class(id) => (id.0.get() - 1) as usize,
             _ => unreachable!(),
         }
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         TypeId::Class(ClassId(unsafe {
             NonZeroU32::new((index + 1) as u32).unwrap_unchecked()
         }))
@@ -730,7 +730,7 @@ impl<'a> ClassEnv<'a> {
         match self.classes.get_mut(ty) {
             Some(class_data) => *class_data = data,
             None => {
-                let len = ty.to_index() + 1 - self.classes.len();
+                let len = ty.index() + 1 - self.classes.len();
                 self.classes
                     .extend((0..len).map(|_| ClassTypeData::default()));
                 self.classes[ty] = data;

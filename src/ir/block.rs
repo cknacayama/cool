@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{index_vec::Key, types::TypeId};
+use crate::{index_vec::Idx, types::TypeId};
 
 use super::{Instr, InstrKind};
 
@@ -27,12 +27,12 @@ impl BlockId {
     }
 }
 
-impl Key for BlockId {
-    fn to_index(self) -> usize {
+impl Idx for BlockId {
+    fn index(self) -> usize {
         self.0 as usize
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         Self(index as u32)
     }
 }

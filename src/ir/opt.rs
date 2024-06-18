@@ -3,7 +3,7 @@ use std::{collections::VecDeque, rc::Rc};
 use crate::{
     ast::{BinOp, UnOp},
     fxhash::{FxHashMap, FxHashSet},
-    index_vec::{index_vec, IndexVec, Key},
+    index_vec::{index_vec, Idx, IndexVec},
     types::TypeId,
 };
 
@@ -24,26 +24,12 @@ pub type PhiPositions = IndexVec<BlockId, Vec<(LocalId, Box<[(LocalId, BlockId)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstrId(usize);
 
-impl InstrId {
-    fn prev(self) -> Self {
-        Self(self.0 - 1)
-    }
-
-    fn next(self) -> Self {
-        Self(self.0 + 1)
-    }
-
-    fn next_nth(self, n: usize) -> Self {
-        Self(self.0 + n)
-    }
-}
-
-impl Key for InstrId {
-    fn to_index(self) -> usize {
+impl Idx for InstrId {
+    fn index(self) -> usize {
         self.0
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         Self(index)
     }
 }
@@ -88,7 +74,7 @@ impl Function {
     pub fn successors_visit<F: FnMut(BlockId)>(&self, block: BlockId, mut f: F) {
         let BlockData { end, .. } = self.blocks[block];
 
-        let block_end = end.prev();
+        let block_end = end.prev().unwrap();
 
         match self.instrs[block_end].kind {
             InstrKind::Jmp(target) => {
@@ -148,7 +134,7 @@ impl Function {
         uses: &mut FxHashMap<IrId, VarUses>,
     ) {
         let BlockData { end, .. } = self.blocks[block];
-        let end = end.prev();
+        let end = end.prev().unwrap();
 
         match self.instrs[end].kind {
             InstrKind::Jmp(target) => {
@@ -182,7 +168,7 @@ impl Function {
         self.instrs[start..end]
             .iter_mut()
             .enumerate()
-            .map(move |(i, instr)| (start.next_nth(i), instr))
+            .map(move |(i, instr)| (start.plus(i), instr))
     }
 
     fn replace_block_with_nop(&mut self, block: BlockId) {
@@ -354,7 +340,7 @@ impl FunctionOptmizer {
             !matches!(kind, InstrKind::Label(_) | InstrKind::Function { .. })
         });
 
-        for block in (start.next().to_index()..end.to_index()).map(BlockId::from_index) {
+        for block in (start.plus(1).index()..end.index()).map(BlockId::new) {
             self.function.replace_block_with_nop(block);
         }
 
@@ -716,8 +702,7 @@ impl FunctionOptmizer {
                     );
                     Instr::new(kind, ty)
                 }));
-            let block_len =
-                self.blocks()[block].end.to_index() - self.blocks()[block].start.to_index();
+            let block_len = self.blocks()[block].end.index() - self.blocks()[block].start.index();
 
             self.instrs_mut().extend(
                 instrs
@@ -758,7 +743,7 @@ impl FunctionOptmizer {
                 InstrKind::Return(_) => {
                     let data = BlockData {
                         start: cur_start,
-                        end:   id.next(),
+                        end:   id.plus(1),
                         id:    cur_block,
                     };
 
@@ -839,7 +824,7 @@ impl InstrKind {
 
             Self::Function { id, params, .. } => {
                 for (_, param) in params.iter_mut() {
-                    let new_id = tmp.next_mut();
+                    let new_id = tmp.next();
                     let old_id = *param;
                     renames.entry(old_id).or_default().push(new_id);
                     *param = new_id;
@@ -880,7 +865,7 @@ impl InstrKind {
             Self::Store { dst, src, .. } => match src {
                 Value::Id(id) => {
                     let cur_id = *renames.get(id).unwrap().last().unwrap();
-                    let new_id = tmp.next_mut();
+                    let new_id = tmp.next();
                     let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
                     *self = Self::Assign(new_id, Value::Id(cur_id));
@@ -889,7 +874,7 @@ impl InstrKind {
                     return Some(old_id);
                 }
                 val => {
-                    let new_id = tmp.next_mut();
+                    let new_id = tmp.next();
                     let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
                     let val = std::mem::take(val);
@@ -903,7 +888,7 @@ impl InstrKind {
                 let cur_id2 = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id2;
                 update_var_uses(uses, cur_id2, instr_id);
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
@@ -913,7 +898,7 @@ impl InstrKind {
 
             Self::AssignLoad { dst, src, .. } => {
                 let cur_id2 = *renames.get(src).unwrap().last().unwrap();
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
@@ -934,7 +919,7 @@ impl InstrKind {
                 let cur_val = renames.get(val).unwrap().last().unwrap();
                 *val = *cur_val;
                 update_var_uses(uses, cur_val, instr_id);
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
@@ -954,7 +939,7 @@ impl InstrKind {
                 let cur_rhs = renames.get(rhs).unwrap().last().unwrap();
                 *rhs = *cur_rhs;
                 update_var_uses(uses, cur_rhs, instr_id);
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
@@ -979,7 +964,7 @@ impl InstrKind {
                 let cur_id = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id;
                 update_var_uses(uses, cur_id, instr_id);
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;
@@ -1001,7 +986,7 @@ impl InstrKind {
                     *id = *cur_id;
                     update_var_uses(uses, cur_id, instr_id);
                 }
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *id1;
                 renames.entry(old_id).or_default().push(new_id);
                 *id1 = new_id;
@@ -1010,7 +995,7 @@ impl InstrKind {
             }
 
             Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::Phi(dst, _) => {
-                let new_id = tmp.next_mut();
+                let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *dst = new_id;

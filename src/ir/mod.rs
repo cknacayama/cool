@@ -2,7 +2,7 @@ use std::{fmt, rc::Rc};
 
 use crate::{
     ast::{BinOp, UnOp},
-    index_vec::{IndexVec, Key},
+    index_vec::{Idx, IndexVec},
     types::TypeId,
 };
 
@@ -43,8 +43,8 @@ pub enum InstrKind {
     Vtable(GlobalId, Box<[GlobalId]>),
     Function {
         id:     IrId,
-        ret:    usize,
-        params: Box<[(usize, IrId)]>,
+        ret:    TypeId,
+        params: Box<[(TypeId, IrId)]>,
     },
     Return(Value),
     Label(BlockId),
@@ -68,7 +68,7 @@ pub enum InstrKind {
         op:  UnOp,
         src: IrId,
     },
-    AssignCall(IrId, IrId, Box<[(usize, Value)]>),
+    AssignCall(IrId, IrId, Box<[(TypeId, Value)]>),
     AssignExtract(IrId, IrId, usize),
     AssignInsert {
         dst: IrId,
@@ -79,18 +79,18 @@ pub enum InstrKind {
     Phi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
-    Local(usize, IrId),
+    Local(TypeId, IrId),
 
     AssignLoad {
         dst:    IrId,
-        size:   usize,
+        ty:     TypeId,
         src:    IrId,
         offset: usize,
     },
     Store {
-        dst:  IrId,
-        size: usize,
-        src:  Value,
+        dst: IrId,
+        ty:  TypeId,
+        src: Value,
     },
 }
 
@@ -276,13 +276,13 @@ impl fmt::Display for InstrKind {
             InstrKind::Local(ty, name) => write!(f, "    local {} {}", ty, name),
             InstrKind::AssignLoad {
                 dst,
-                size,
+                ty: size,
                 src,
                 offset,
             } => {
                 write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
             }
-            InstrKind::Store { dst, size, src } => {
+            InstrKind::Store { dst, ty: size, src } => {
                 write!(f, "    store {}, {} {}", dst, size, src)
             }
         }
@@ -316,8 +316,8 @@ pub enum IrId {
     Global(GlobalId),
 }
 
-impl Key for IrId {
-    fn to_index(self) -> usize {
+impl Idx for IrId {
+    fn index(self) -> usize {
         match self {
             Self::Tmp(subs) | Self::Renamed(subs) => subs as usize,
             Self::Local(LocalId(subs)) | Self::Ptr(LocalId(subs)) => subs as usize,
@@ -325,7 +325,7 @@ impl Key for IrId {
         }
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         Self::Tmp(index as u32)
     }
 }
@@ -369,21 +369,6 @@ impl IrId {
             | Self::Renamed(subs) => subs,
         }
     }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Tmp(index) => Self::Tmp(index + 1),
-            Self::Local(LocalId(index)) => Self::Local(LocalId(index + 1)),
-            Self::Ptr(LocalId(index)) => Self::Ptr(LocalId(index + 1)),
-            Self::Global(GlobalId(index)) => Self::Global(GlobalId(index + 1)),
-            Self::Renamed(index) => Self::Renamed(index + 1),
-        }
-    }
-
-    pub fn next_mut(&mut self) -> Self {
-        *self = self.next();
-        *self
-    }
 }
 
 impl fmt::Display for IrId {
@@ -411,22 +396,22 @@ impl fmt::Display for GlobalId {
     }
 }
 
-impl Key for LocalId {
-    fn to_index(self) -> usize {
+impl Idx for LocalId {
+    fn index(self) -> usize {
         self.0 as usize
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         Self(index as u32)
     }
 }
 
-impl Key for GlobalId {
-    fn to_index(self) -> usize {
+impl Idx for GlobalId {
+    fn index(self) -> usize {
         self.0 as usize
     }
 
-    fn from_index(index: usize) -> Self {
+    fn new(index: usize) -> Self {
         Self(index as u32)
     }
 }
@@ -467,9 +452,9 @@ impl InstrKind {
                 s
             }
             InstrKind::Function { id, ret, params } => {
-                let mut s = format!("fn {} {}(", ret, id.to_ir_string(globals));
+                let mut s = format!("fn {} {}(", ret.to_ir_type(), id.to_ir_string(globals));
                 for (i, (ty, id)) in params.iter().enumerate() {
-                    s.push_str(&format!("{} {}", ty, id.to_ir_string(globals)));
+                    s.push_str(&format!("{} {}", ty.to_ir_type(), id.to_ir_string(globals)));
                     if i != params.len() - 1 {
                         s.push_str(", ");
                     }
@@ -513,7 +498,11 @@ impl InstrKind {
             InstrKind::AssignCall(id, func, args) => {
                 let mut s = format!("    {} = call {}(", id, func.to_ir_string(globals));
                 for (i, arg) in args.iter().enumerate() {
-                    s.push_str(&format!("{} {}", arg.0, arg.1.to_ir_string(globals)));
+                    s.push_str(&format!(
+                        "{} {}",
+                        arg.0.to_ir_type(),
+                        arg.1.to_ir_string(globals)
+                    ));
                     if i != args.len() - 1 {
                         s.push_str(", ");
                     }
@@ -551,20 +540,25 @@ impl InstrKind {
             InstrKind::Local(ty, name) => format!("    local {} {}", ty, name),
             InstrKind::AssignLoad {
                 dst,
-                size,
+                ty,
                 src,
                 offset,
             } => {
                 format!(
                     "    {} = load {} {}, {}",
                     dst,
-                    size,
+                    ty.to_ir_type(),
                     src.to_ir_string(globals),
                     offset
                 )
             }
-            InstrKind::Store { dst, size, src } => {
-                format!("    store {}, {} {}", dst.to_ir_string(globals), size, src)
+            InstrKind::Store { dst, ty, src } => {
+                format!(
+                    "    store {}, {} {}",
+                    dst.to_ir_string(globals),
+                    ty.to_ir_type(),
+                    src
+                )
             }
         }
     }
