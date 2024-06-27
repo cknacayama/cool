@@ -10,7 +10,7 @@ use crate::{
 use super::{
     block::BlockId,
     builder::{FunctionBuilder, GlobalValue, IrBuilder},
-    GlobalId, Instr, InstrKind, IrId, LocalId, Value,
+    GlobalId, Instr, IrId, LocalId, Value,
 };
 
 pub type Predecessors = IndexVec<BlockId, Vec<BlockId>>;
@@ -76,17 +76,17 @@ impl Function {
 
         let block_end = end.prev().unwrap();
 
-        match self.instrs[block_end].kind {
-            InstrKind::Jmp(target) => {
+        match self.instrs[block_end] {
+            Instr::Jmp(target) => {
                 f(target);
             }
-            InstrKind::JmpCond {
+            Instr::JmpCond {
                 on_true, on_false, ..
             } => {
                 f(on_true);
                 f(on_false);
             }
-            InstrKind::Return(_) => {}
+            Instr::Return(_) => {}
             _ => unreachable!(),
         }
     }
@@ -111,8 +111,8 @@ impl Function {
     ) {
         let iter = self
             .instrs_block_iter_mut(block)
-            .filter_map(|(id, instr)| match instr.kind {
-                InstrKind::Phi(_, ref mut args) => Some((id, args)),
+            .filter_map(|(id, instr)| match instr {
+                Instr::Phi(_, args) => Some((id, args)),
                 _ => None,
             });
 
@@ -136,13 +136,13 @@ impl Function {
         let BlockData { end, .. } = self.blocks[block];
         let end = end.prev().unwrap();
 
-        match self.instrs[end].kind {
-            InstrKind::Jmp(target) => {
+        match self.instrs[end] {
+            Instr::Jmp(target) => {
                 let position = preds[target].iter().position(|&p| p == block).unwrap();
                 self.rename_phi_arg(block, target, renames, position, uses);
             }
 
-            InstrKind::JmpCond {
+            Instr::JmpCond {
                 on_true, on_false, ..
             } => {
                 let position = preds[on_true].iter().position(|&p| p == block).unwrap();
@@ -150,7 +150,7 @@ impl Function {
                 let position = preds[on_false].iter().position(|&p| p == block).unwrap();
                 self.rename_phi_arg(block, on_false, renames, position, uses);
             }
-            InstrKind::Return(_) => {}
+            Instr::Return(_) => {}
             _ => unreachable!(),
         }
     }
@@ -174,19 +174,19 @@ impl Function {
     fn replace_block_with_nop(&mut self, block: BlockId) {
         let BlockData { start, end, .. } = self.blocks[block];
         for instr in &mut self.instrs[start..end] {
-            instr.kind.replace_with_nop();
+            instr.replace_with_nop();
         }
     }
 
-    fn filter_replace_block_with_nop<P: FnMut(&InstrKind) -> bool>(
+    fn filter_replace_block_with_nop<P: FnMut(&Instr) -> bool>(
         &mut self,
         block: BlockId,
         mut pred: P,
     ) {
         let BlockData { start, end, .. } = self.blocks[block];
         for instr in &mut self.instrs[start..end] {
-            if pred(&instr.kind) {
-                instr.kind.replace_with_nop();
+            if pred(instr) {
+                instr.replace_with_nop();
             }
         }
     }
@@ -245,7 +245,7 @@ impl FunctionOptmizer {
         &mut self.function.instrs
     }
 
-    fn instrs(&self) -> &IndexVec<InstrId, Instr> {
+    pub fn instrs(&self) -> &IndexVec<InstrId, Instr> {
         &self.function.instrs
     }
 
@@ -280,18 +280,13 @@ impl FunctionOptmizer {
     }
 
     fn can_merge(&self, block: BlockId) -> bool {
-        self.instrs_block(block)
-            .iter()
-            .all(|instr| match instr.kind {
-                InstrKind::Label(_)
-                | InstrKind::Nop
-                | InstrKind::Return(_)
-                | InstrKind::Function { .. } => true,
+        self.instrs_block(block).iter().all(|instr| match instr {
+            Instr::Label(_) | Instr::Nop | Instr::Return(_) | Instr::Function { .. } => true,
 
-                InstrKind::Jmp(target) => target == block.next(),
+            Instr::Jmp(target) => *target == block.plus(1),
 
-                _ => false,
-            })
+            _ => false,
+        })
     }
 
     fn try_merge_blocks(&mut self) {
@@ -337,7 +332,7 @@ impl FunctionOptmizer {
 
     fn merge_blocks(&mut self, start: BlockId, end: BlockId) {
         self.function.filter_replace_block_with_nop(start, |kind| {
-            !matches!(kind, InstrKind::Label(_) | InstrKind::Function { .. })
+            !matches!(kind, Instr::Label(_) | Instr::Function { .. })
         });
 
         for block in (start.plus(1).index()..end.index()).map(BlockId::new) {
@@ -345,7 +340,7 @@ impl FunctionOptmizer {
         }
 
         self.function.filter_replace_block_with_nop(end, |kind| {
-            !matches!(kind, InstrKind::Jmp(_) | InstrKind::Return(_))
+            !matches!(kind, Instr::Jmp(_) | Instr::Return(_))
         });
     }
 
@@ -399,24 +394,22 @@ impl FunctionOptmizer {
 
     fn rename_merged_blocks(&mut self, new_blocks: &IndexVec<BlockId, BlockId>) {
         for (_, instr) in self.instrs_mut() {
-            match instr.kind {
-                InstrKind::Jmp(ref mut target) => {
+            match instr {
+                Instr::Jmp(target) => {
                     *target = new_blocks[*target];
                 }
-                InstrKind::JmpCond {
-                    ref mut on_true,
-                    ref mut on_false,
-                    ..
+                Instr::JmpCond {
+                    on_true, on_false, ..
                 } => {
                     *on_true = new_blocks[*on_true];
                     *on_false = new_blocks[*on_false];
                 }
-                InstrKind::Phi(_, ref mut vals) => {
+                Instr::Phi(_, vals) => {
                     vals.iter_mut().for_each(|(_, block)| {
                         *block = new_blocks[*block];
                     });
                 }
-                InstrKind::Label(ref mut block) => {
+                Instr::Label(block) => {
                     *block = new_blocks[*block];
                 }
                 _ => {}
@@ -428,28 +421,26 @@ impl FunctionOptmizer {
         let mut remove = false;
         for (_, instr) in self.instrs_mut() {
             if remove {
-                match instr.kind {
-                    InstrKind::Label(_) => remove = false,
-                    _ => instr.kind.replace_with_nop(),
+                match instr {
+                    Instr::Label(_) => remove = false,
+                    _ => instr.replace_with_nop(),
                 }
             }
-            match instr.kind {
-                InstrKind::Label(ref mut block) => match new_blocks[*block] {
+            match instr {
+                Instr::Label(block) => match new_blocks[*block] {
                     Some(new_block) => *block = new_block,
                     None => {
-                        instr.kind.replace_with_nop();
+                        instr.replace_with_nop();
                         remove = true;
                     }
                 },
-                InstrKind::Jmp(ref mut target) => {
+                Instr::Jmp(target) => {
                     if let Some(new_target) = new_blocks[*target] {
                         *target = new_target
                     }
                 }
-                InstrKind::JmpCond {
-                    ref mut on_true,
-                    ref mut on_false,
-                    ..
+                Instr::JmpCond {
+                    on_true, on_false, ..
                 } => {
                     if let Some(new_target) = new_blocks[*on_true] {
                         *on_true = new_target
@@ -458,7 +449,7 @@ impl FunctionOptmizer {
                         *on_false = new_target
                     }
                 }
-                InstrKind::Phi(id, ref mut vals) => {
+                Instr::Phi(id, vals) => {
                     vals.retain_mut(|(_, block)| match new_blocks[*block] {
                         Some(new_block) => {
                             *block = new_block;
@@ -467,10 +458,10 @@ impl FunctionOptmizer {
                         None => false,
                     });
                     if vals.is_empty() {
-                        instr.kind.replace_with_nop();
+                        instr.replace_with_nop();
                     } else if vals.len() == 1 {
                         let val = std::mem::take(&mut vals[0].0);
-                        instr.kind = InstrKind::Assign(id, val);
+                        *instr = Instr::Assign(*id, val);
                     }
                 }
                 _ => {}
@@ -538,7 +529,7 @@ impl FunctionOptmizer {
 
         for block_id in self.block_ids() {
             for instr in self.instrs_block(block_id) {
-                if let InstrKind::Store { dst, .. } = instr.kind {
+                if let Instr::Store { dst, .. } = instr {
                     if let Some(dst) = dst.local_id() {
                         stores[dst].1.push(block_id);
                     }
@@ -554,7 +545,7 @@ impl FunctionOptmizer {
 
         for block_id in self.block_ids() {
             for instr in self.instrs_block(block_id) {
-                let (decl, used) = instr.kind.uses();
+                let (decl, used) = instr.uses();
                 if let Some(decl) = decl.and_then(|id| id.local_id()) {
                     uses[decl].0 = block_id;
                 }
@@ -645,7 +636,7 @@ impl FunctionOptmizer {
             let mut defined = vec![];
 
             for (id, instr) in function.instrs_block_iter_mut(block) {
-                if let Some(id) = instr.kind.rename(id, renames, cur_tmp, uses) {
+                if let Some(id) = instr.rename(id, renames, cur_tmp, uses) {
                     defined.push(id);
                 }
             }
@@ -688,26 +679,24 @@ impl FunctionOptmizer {
 
         for (block, phis) in phis.into_iter() {
             if !block.is_entry() {
-                self.instrs_mut()
-                    .push(Instr::new(InstrKind::Label(block), TypeId::SelfType));
+                self.instrs_mut().push(Instr::Label(block));
             }
             self.instrs_mut()
-                .extend(phis.into_iter().map(|(local, args, ty)| {
-                    let kind = InstrKind::Phi(
+                .extend(phis.into_iter().map(|(local, args, _)| {
+                    Instr::Phi(
                         IrId::Local(local),
                         args.into_vec()
                             .into_iter()
                             .map(|(val, block)| (Value::Id(IrId::Local(val)), block))
                             .collect(),
-                    );
-                    Instr::new(kind, ty)
+                    )
                 }));
             let block_len = self.blocks()[block].end.index() - self.blocks()[block].start.index();
 
             self.instrs_mut().extend(
                 instrs
                     .by_ref()
-                    .skip_while(|instr| matches!(instr.kind, InstrKind::Label(_)))
+                    .skip_while(|instr| matches!(instr, Instr::Label(_)))
                     .take(block_len - 1),
             );
         }
@@ -716,7 +705,7 @@ impl FunctionOptmizer {
     }
 
     fn remove_nops(&mut self) {
-        self.function.instrs.retain(|instr| !instr.kind.is_nop());
+        self.function.instrs.retain(|instr| !instr.is_nop());
         self.function.instrs.shrink_to_fit();
         self.update_blocks();
     }
@@ -727,8 +716,8 @@ impl FunctionOptmizer {
         let mut blocks = IndexVec::with_capacity(self.blocks_count());
 
         for (id, instr) in self.instrs() {
-            match instr.kind {
-                InstrKind::Label(block) => {
+            match instr {
+                Instr::Label(block) => {
                     let data = BlockData {
                         start: cur_start,
                         end:   id,
@@ -737,10 +726,10 @@ impl FunctionOptmizer {
 
                     blocks.push(data);
 
-                    cur_block = block;
+                    cur_block = *block;
                     cur_start = id;
                 }
-                InstrKind::Return(_) => {
+                Instr::Return(_) => {
                     let data = BlockData {
                         start: cur_start,
                         end:   id.plus(1),
@@ -765,7 +754,7 @@ impl FunctionOptmizer {
         let mut res = self.remove_dead_blocks();
 
         while let Some(id) = uses.iter().find_map(|(id, VarUses { decl, uses })| {
-            if uses.is_empty() && !self.instrs()[*decl].kind.is_function() {
+            if uses.is_empty() && !self.instrs()[*decl].is_function() {
                 Some(*id)
             } else {
                 None
@@ -773,7 +762,7 @@ impl FunctionOptmizer {
         }) {
             res = true;
             let VarUses { decl, .. } = uses.remove(&id).unwrap();
-            self.instrs_mut()[decl].kind.replace_with_nop();
+            self.instrs_mut()[decl].replace_with_nop();
             for uses in uses.values_mut() {
                 uses.uses.remove(&decl);
             }
@@ -791,7 +780,7 @@ impl FunctionOptmizer {
 
         while let Some(id) = work_list.pop_front() {
             let instr = &mut self.instrs_mut()[id];
-            if let Some(uses) = instr.kind.const_fold(&mut values, uses) {
+            if let Some(uses) = instr.const_fold(&mut values, uses) {
                 changed = true;
                 work_list.extend(uses.uses);
             }
@@ -811,7 +800,7 @@ fn update_var_uses(uses: &mut FxHashMap<IrId, VarUses>, id: &IrId, instr_id: Ins
     uses.get_mut(id).unwrap().uses.insert(instr_id);
 }
 
-impl InstrKind {
+impl Instr {
     pub fn rename(
         &mut self,
         instr_id: InstrId,
@@ -972,7 +961,7 @@ impl InstrKind {
                 return Some(old_id);
             }
 
-            Self::AssignCall(id1, id2, args) => {
+            Self::AssignCall(id1, _, id2, args) => {
                 if !id2.is_global() {
                     let cur_id2 = renames.get(id2).unwrap().last().unwrap();
                     *id2 = *cur_id2;
@@ -1018,7 +1007,7 @@ impl InstrKind {
         uses: &mut FxHashMap<IrId, VarUses>,
     ) -> Option<VarUses> {
         match self {
-            InstrKind::Assign(id, val) => {
+            Instr::Assign(id, val) => {
                 let mut val = std::mem::take(val);
                 Self::try_replace(values, &mut val);
                 let folded = uses.remove(id).unwrap();
@@ -1031,7 +1020,7 @@ impl InstrKind {
                 self.replace_with_nop();
                 Some(folded)
             }
-            InstrKind::AssignUn { op, dst, src } => {
+            Instr::AssignUn { op, dst, src } => {
                 let op = *op;
                 let dst = *dst;
                 Self::try_replace_id(values, src);
@@ -1044,7 +1033,7 @@ impl InstrKind {
                     None
                 }
             }
-            InstrKind::AssignBin { op, dst, lhs, rhs } => {
+            Instr::AssignBin { op, dst, lhs, rhs } => {
                 let op = *op;
                 let dst = *dst;
                 Self::try_replace(values, lhs);
@@ -1064,7 +1053,7 @@ impl InstrKind {
                 }
             }
 
-            InstrKind::JmpCond {
+            Instr::JmpCond {
                 src,
                 on_true,
                 on_false,
@@ -1077,7 +1066,7 @@ impl InstrKind {
                 None
             }
 
-            InstrKind::AssignCall(_, id, args) => {
+            Instr::AssignCall(_, _, id, args) => {
                 for arg in args.iter_mut().map(|(_, id)| id) {
                     Self::try_replace(values, arg);
                 }
@@ -1085,39 +1074,39 @@ impl InstrKind {
                 None
             }
 
-            InstrKind::AssignExtract(_, id, _) => {
+            Instr::AssignExtract(_, id, _) => {
                 Self::try_replace_id(values, id);
                 None
             }
-            InstrKind::AssignInsert { val, .. } => {
+            Instr::AssignInsert { val, .. } => {
                 Self::try_replace(values, val);
                 None
             }
-            InstrKind::Phi(_, vals) => {
+            Instr::Phi(_, vals) => {
                 for (val, _) in vals.iter_mut() {
                     Self::try_replace(values, val);
                 }
                 None
             }
-            InstrKind::Return(id) => {
+            Instr::Return(id) => {
                 Self::try_replace(values, id);
                 None
             }
-            InstrKind::Store { src, .. } => {
+            Instr::Store { src, .. } => {
                 Self::try_replace(values, src);
                 None
             }
-            InstrKind::AssignLoad { src, .. } => {
+            Instr::AssignLoad { src, .. } => {
                 Self::try_replace_id(values, src);
                 None
             }
 
-            InstrKind::Local(_, _)
-            | InstrKind::Jmp(_)
-            | InstrKind::Function { .. }
-            | InstrKind::Label(_)
-            | InstrKind::Nop
-            | InstrKind::Vtable(_, _) => None,
+            Instr::Local(_, _)
+            | Instr::Jmp(_)
+            | Instr::Function { .. }
+            | Instr::Label(_)
+            | Instr::Nop
+            | Instr::Vtable(_, _) => None,
         }
     }
 
@@ -1147,9 +1136,9 @@ impl InstrKind {
     ) {
         if let Some(Value::Bool(val)) = values.get(&id) {
             if *val {
-                *self = InstrKind::Jmp(on_true);
+                *self = Instr::Jmp(on_true);
             } else {
-                *self = InstrKind::Jmp(on_false);
+                *self = Instr::Jmp(on_false);
             }
         }
     }
@@ -1235,9 +1224,9 @@ impl InstrKind {
 }
 
 pub struct IrOptmizer {
-    functions: Vec<FunctionOptmizer>,
-    vtables:   Vec<InstrKind>,
-    globals:   IndexVec<GlobalId, Rc<str>>,
+    pub functions: Vec<FunctionOptmizer>,
+    pub vtables:   Vec<Instr>,
+    pub globals:   IndexVec<GlobalId, Rc<str>>,
 }
 
 impl IrOptmizer {
@@ -1279,15 +1268,15 @@ impl IrOptmizer {
         }
     }
 
-    fn instrs_with_nops(&self) -> impl Iterator<Item = &InstrKind> {
+    fn instrs_with_nops(&self) -> impl Iterator<Item = &Instr> {
         self.vtables.iter().chain(
             self.functions
                 .iter()
-                .flat_map(|m| m.instrs().inner().iter().map(|i| &i.kind)),
+                .flat_map(|m| m.instrs().inner().iter()),
         )
     }
 
-    pub fn instrs(&self) -> impl Iterator<Item = &InstrKind> {
+    pub fn instrs(&self) -> impl Iterator<Item = &Instr> {
         self.instrs_with_nops().filter(|i| !i.is_nop())
     }
 }

@@ -3,14 +3,15 @@ use std::{fmt, rc::Rc};
 use crate::{
     ast::{BinOp, UnOp},
     index_vec::{Idx, IndexVec},
-    types::TypeId,
 };
 
 use block::BlockId;
+use types::Type;
 
 pub mod block;
 pub mod builder;
 pub mod opt;
+pub mod types;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Value {
@@ -37,14 +38,14 @@ impl fmt::Display for Value {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstrKind {
+pub enum Instr {
     Nop,
 
     Vtable(GlobalId, Box<[GlobalId]>),
     Function {
         id:     IrId,
-        ret:    TypeId,
-        params: Box<[(TypeId, IrId)]>,
+        ret:    Type,
+        params: Box<[(Type, IrId)]>,
     },
     Return(Value),
     Label(BlockId),
@@ -68,10 +69,11 @@ pub enum InstrKind {
         op:  UnOp,
         src: IrId,
     },
-    AssignCall(IrId, IrId, Box<[(TypeId, Value)]>),
+    AssignCall(IrId, Type, IrId, Box<[(Type, Value)]>),
     AssignExtract(IrId, IrId, usize),
     AssignInsert {
         dst: IrId,
+        ty:  Type,
         src: IrId,
         val: Value,
         idx: usize,
@@ -79,28 +81,28 @@ pub enum InstrKind {
     Phi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
-    Local(TypeId, IrId),
+    Local(Type, IrId),
 
     AssignLoad {
         dst:    IrId,
-        ty:     TypeId,
+        ty:     Type,
         src:    IrId,
         offset: usize,
     },
     Store {
         dst: IrId,
-        ty:  TypeId,
+        ty:  Type,
         src: Value,
     },
 }
 
-impl InstrKind {
+impl Instr {
     pub fn is_block_end(&self) -> bool {
         matches!(self, Self::Return(_) | Self::Jmp(_) | Self::JmpCond { .. })
     }
 
     pub fn is_function(&self) -> bool {
-        matches!(self, Self::AssignCall(_, _, _) | Self::Function { .. })
+        matches!(self, Self::AssignCall(_, _, _, _) | Self::Function { .. })
     }
 
     pub fn is_nop(&self) -> bool {
@@ -174,7 +176,7 @@ impl InstrKind {
 
             Self::Assign(dst, _) | Self::AssignBin { dst, .. } => (Some(*dst), None),
 
-            Self::AssignCall(dst, id2, args) => {
+            Self::AssignCall(dst, _, id2, args) => {
                 let used_ids = args
                     .iter()
                     .filter_map(|(_, val)| match val {
@@ -206,11 +208,11 @@ impl InstrKind {
     }
 }
 
-impl fmt::Display for InstrKind {
+impl fmt::Display for Instr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InstrKind::Nop => write!(f, "    nop"),
-            InstrKind::Vtable(dst, ids) => {
+            Instr::Nop => write!(f, "    nop"),
+            Instr::Vtable(dst, ids) => {
                 write!(f, "{} = [", dst)?;
                 for (i, id) in ids.iter().enumerate() {
                     write!(f, "{}", id)?;
@@ -220,7 +222,7 @@ impl fmt::Display for InstrKind {
                 }
                 write!(f, "]")
             }
-            InstrKind::Function { id, ret, params } => {
+            Instr::Function { id, ret, params } => {
                 write!(f, "fn {} {}(", ret, id)?;
                 for (i, (ty, id)) in params.iter().enumerate() {
                     write!(f, "{} {}", ty, id)?;
@@ -230,25 +232,25 @@ impl fmt::Display for InstrKind {
                 }
                 write!(f, ") {{")
             }
-            InstrKind::Return(id) => write!(f, "    ret {}\n}}", id),
-            InstrKind::Label(subs) => write!(f, "block{}:", subs),
-            InstrKind::Jmp(subs) => write!(f, "    jmp block{}", subs),
-            InstrKind::JmpCond {
+            Instr::Return(id) => write!(f, "    ret {}\n}}", id),
+            Instr::Label(subs) => write!(f, "block{}:", subs),
+            Instr::Jmp(subs) => write!(f, "    jmp block{}", subs),
+            Instr::JmpCond {
                 src,
                 on_true,
                 on_false,
             } => {
                 write!(f, "    {} ? block{} : block{}", src, on_true, on_false)
             }
-            InstrKind::Assign(id, val) => write!(f, "    {} = {}", id, val),
-            InstrKind::AssignBin { op, dst, lhs, rhs } => {
+            Instr::Assign(id, val) => write!(f, "    {} = {}", id, val),
+            Instr::AssignBin { op, dst, lhs, rhs } => {
                 write!(f, "    {} = {} {}, {}", dst, op.to_ir_string(), lhs, rhs)
             }
-            InstrKind::AssignUn { op, dst, src } => {
+            Instr::AssignUn { op, dst, src } => {
                 write!(f, "    {} = {} {}", dst, op.to_ir_string(), src)
             }
-            InstrKind::AssignCall(id, func, args) => {
-                write!(f, "    {} = call {}(", id, func)?;
+            Instr::AssignCall(id, ty, func, args) => {
+                write!(f, "    {} = call {} {}(", id, ty, func)?;
                 for (i, arg) in args.iter().enumerate() {
                     write!(f, "{} {}", arg.0, arg.1)?;
                     if i != args.len() - 1 {
@@ -257,13 +259,19 @@ impl fmt::Display for InstrKind {
                 }
                 write!(f, ")")
             }
-            InstrKind::AssignExtract(id, obj, index) => {
+            Instr::AssignExtract(id, obj, index) => {
                 write!(f, "    {} = extract {}, {}", id, obj, index)
             }
-            InstrKind::AssignInsert { dst, src, val, idx } => {
-                write!(f, "    {} = insert {}, {}, {}", dst, src, val, idx)
+            Instr::AssignInsert {
+                dst,
+                ty,
+                src,
+                val,
+                idx,
+            } => {
+                write!(f, "    {} = insert {} {}, {}, {}", dst, ty, src, val, idx)
             }
-            InstrKind::Phi(id, vals) => {
+            Instr::Phi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
                 for (i, (val, block)) in vals.iter().enumerate() {
                     write!(f, "[{}, block{}]", val, block)?;
@@ -273,8 +281,8 @@ impl fmt::Display for InstrKind {
                 }
                 Ok(())
             }
-            InstrKind::Local(ty, name) => write!(f, "    local {} {}", ty, name),
-            InstrKind::AssignLoad {
+            Instr::Local(ty, name) => write!(f, "    local {} {}", ty, name),
+            Instr::AssignLoad {
                 dst,
                 ty: size,
                 src,
@@ -282,22 +290,10 @@ impl fmt::Display for InstrKind {
             } => {
                 write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
             }
-            InstrKind::Store { dst, ty: size, src } => {
+            Instr::Store { dst, ty: size, src } => {
                 write!(f, "    store {}, {} {}", dst, size, src)
             }
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Instr {
-    pub kind: InstrKind,
-    pub ty:   TypeId,
-}
-
-impl Instr {
-    pub fn new(kind: InstrKind, ty: TypeId) -> Self {
-        Self { kind, ty }
     }
 }
 
@@ -375,7 +371,7 @@ impl fmt::Display for IrId {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tmp(subs) => write!(f, "%{}", subs),
+            Self::Tmp(subs) => write!(f, "%t{}", subs),
             Self::Local(LocalId(subs)) => write!(f, "%local_{}", subs),
             Self::Ptr(LocalId(subs)) => write!(f, "%ptr_{}", subs),
             Self::Global(GlobalId(subs)) => write!(f, "@globl_{}", subs),
@@ -416,6 +412,12 @@ impl Idx for GlobalId {
     }
 }
 
+impl GlobalId {
+    #[inline]
+    pub fn to_ident(self, globals: &IndexVec<GlobalId, Rc<str>>) -> &str {
+        &globals[self]
+    }
+}
 impl IrId {
     #[inline]
     pub fn to_ir_string(self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
@@ -436,11 +438,11 @@ impl Value {
     }
 }
 
-impl InstrKind {
+impl Instr {
     pub fn to_ir_string(&self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
         match self {
-            InstrKind::Nop => "    nop".to_string(),
-            InstrKind::Vtable(dst, ids) => {
+            Instr::Nop => "    nop".to_string(),
+            Instr::Vtable(dst, ids) => {
                 let mut s = format!("@{} = [", globals[*dst]);
                 for (i, id) in ids.iter().enumerate() {
                     s.push_str(&format!("@{}", globals[*id]));
@@ -451,10 +453,10 @@ impl InstrKind {
                 s.push(']');
                 s
             }
-            InstrKind::Function { id, ret, params } => {
-                let mut s = format!("fn {} {}(", ret.to_ir_type(), id.to_ir_string(globals));
+            Instr::Function { id, ret, params } => {
+                let mut s = format!("fn {} {}(", ret, id.to_ir_string(globals));
                 for (i, (ty, id)) in params.iter().enumerate() {
-                    s.push_str(&format!("{} {}", ty.to_ir_type(), id.to_ir_string(globals)));
+                    s.push_str(&format!("{} {}", ty, id.to_ir_string(globals)));
                     if i != params.len() - 1 {
                         s.push_str(", ");
                     }
@@ -462,10 +464,10 @@ impl InstrKind {
                 s.push_str(") {{");
                 s
             }
-            InstrKind::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),
-            InstrKind::Label(subs) => format!("block{}:", subs),
-            InstrKind::Jmp(subs) => format!("    jmp block{}", subs),
-            InstrKind::JmpCond {
+            Instr::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),
+            Instr::Label(subs) => format!("block{}:", subs),
+            Instr::Jmp(subs) => format!("    jmp block{}", subs),
+            Instr::JmpCond {
                 src,
                 on_true,
                 on_false,
@@ -477,8 +479,8 @@ impl InstrKind {
                     on_false
                 )
             }
-            InstrKind::Assign(id, val) => format!("    {} = {}", id, val.to_ir_string(globals)),
-            InstrKind::AssignBin { op, dst, lhs, rhs } => {
+            Instr::Assign(id, val) => format!("    {} = {}", id, val.to_ir_string(globals)),
+            Instr::AssignBin { op, dst, lhs, rhs } => {
                 format!(
                     "    {} = {} {}, {}",
                     dst,
@@ -487,7 +489,7 @@ impl InstrKind {
                     rhs.to_ir_string(globals)
                 )
             }
-            InstrKind::AssignUn { op, dst, src } => {
+            Instr::AssignUn { op, dst, src } => {
                 format!(
                     "    {} = {} {}",
                     dst,
@@ -495,14 +497,10 @@ impl InstrKind {
                     src.to_ir_string(globals)
                 )
             }
-            InstrKind::AssignCall(id, func, args) => {
-                let mut s = format!("    {} = call {}(", id, func.to_ir_string(globals));
+            Instr::AssignCall(id, ty, func, args) => {
+                let mut s = format!("    {} = call {} {}(", id, ty, func.to_ir_string(globals));
                 for (i, arg) in args.iter().enumerate() {
-                    s.push_str(&format!(
-                        "{} {}",
-                        arg.0.to_ir_type(),
-                        arg.1.to_ir_string(globals)
-                    ));
+                    s.push_str(&format!("{} {}", arg.0, arg.1.to_ir_string(globals)));
                     if i != args.len() - 1 {
                         s.push_str(", ");
                     }
@@ -510,7 +508,7 @@ impl InstrKind {
                 s.push(')');
                 s
             }
-            InstrKind::AssignExtract(id, obj, index) => {
+            Instr::AssignExtract(id, obj, index) => {
                 format!(
                     "    {} = extract {}, {}",
                     id,
@@ -518,16 +516,23 @@ impl InstrKind {
                     index
                 )
             }
-            InstrKind::AssignInsert { dst, src, val, idx } => {
+            Instr::AssignInsert {
+                dst,
+                ty,
+                src,
+                val,
+                idx,
+            } => {
                 format!(
-                    "    {} = insert {}, {}, {}",
+                    "    {} = insert {} {}, {}, {}",
                     dst,
+                    ty,
                     src.to_ir_string(globals),
                     val.to_ir_string(globals),
                     idx
                 )
             }
-            InstrKind::Phi(id, vals) => {
+            Instr::Phi(id, vals) => {
                 let mut s = format!("    {} = phi ", id);
                 for (i, (val, block)) in vals.iter().enumerate() {
                     s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
@@ -537,8 +542,8 @@ impl InstrKind {
                 }
                 s
             }
-            InstrKind::Local(ty, name) => format!("    local {} {}", ty, name),
-            InstrKind::AssignLoad {
+            Instr::Local(ty, name) => format!("    local {} {}", ty, name),
+            Instr::AssignLoad {
                 dst,
                 ty,
                 src,
@@ -547,18 +552,13 @@ impl InstrKind {
                 format!(
                     "    {} = load {} {}, {}",
                     dst,
-                    ty.to_ir_type(),
+                    ty,
                     src.to_ir_string(globals),
                     offset
                 )
             }
-            InstrKind::Store { dst, ty, src } => {
-                format!(
-                    "    store {}, {} {}",
-                    dst.to_ir_string(globals),
-                    ty.to_ir_type(),
-                    src
-                )
+            Instr::Store { dst, ty, src } => {
+                format!("    store {}, {} {}", dst.to_ir_string(globals), ty, src)
             }
         }
     }

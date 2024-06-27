@@ -166,7 +166,7 @@ impl<'a> Checker<'a> {
         let mut attrs = vec![];
         let mut methods = vec![];
 
-        for feature in features.into_vec().into_iter() {
+        for feature in features {
             match feature.kind {
                 FeatureKind::Method {
                     id,

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{index_vec::Idx, types::TypeId};
 
-use super::{Instr, InstrKind};
+use super::Instr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
@@ -39,7 +39,7 @@ impl Idx for BlockId {
 
 impl std::fmt::Display for BlockId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "block{}", self.0)
     }
 }
 
@@ -65,16 +65,15 @@ impl Block {
         self.instrs.push_front(instr)
     }
 
-    pub fn push_back(&mut self, kind: InstrKind, ty: TypeId) {
-        self.instrs.push_back(Instr::new(kind, ty))
+    pub fn push_back(&mut self, kind: Instr) {
+        self.instrs.push_back(kind)
     }
 
     pub fn set_label(&mut self) {
         if self.id.is_entry() {
             return;
         }
-        let kind = InstrKind::Label(self.id);
-        let instr = Instr::new(kind, TypeId::SelfType);
+        let instr = Instr::Label(self.id);
         self.push_front(instr)
     }
 }

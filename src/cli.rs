@@ -3,7 +3,7 @@ use std::{io, path::PathBuf, rc::Rc};
 use crate::{
     checker::{MultiPassChecker, SemanticError, TypeChecker},
     index_vec::IndexVec,
-    ir::{builder::IrBuilder, opt::IrOptmizer, GlobalId, InstrKind},
+    ir::{builder::IrBuilder, opt::IrOptmizer, GlobalId, Instr},
     lexer::Lexer,
     parser::Parser,
 };
@@ -17,7 +17,8 @@ pub enum Mode {
 
     #[default]
     Opt,
-    Asm,
+
+    Llvm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +100,7 @@ impl Config {
                 "-C" => mode = Mode::Check,
                 "-I" => mode = Mode::Ir,
                 "-O" => mode = Mode::Opt,
-                "-S" => mode = Mode::Asm,
+                "-S" => mode = Mode::Llvm,
                 "-o" => {
                     let path = args.next().ok_or(Error::InvalidInputPath(arg))?;
                     output_path = Some(PathBuf::from(path));
@@ -189,7 +190,22 @@ impl Config {
                 ir_opt.optimize();
                 Ok(ir_output(ir_opt.instrs(), ir_opt.globals()))
             }
-            Mode::Asm => todo!(),
+            Mode::Llvm => {
+                let checker = MultiPassChecker::from_input(&self.input)?;
+                let (typed, env) = checker.check_all()?;
+                let mut ir_builder = IrBuilder::new(env);
+                for typed in typed {
+                    ir_builder.build_class(typed);
+                }
+                let mut ir_opt = IrOptmizer::from_builder(ir_builder);
+                ir_opt.optimize();
+                let IrOptmizer {
+                    functions,
+                    vtables,
+                    globals,
+                } = ir_opt;
+                todo!()
+            }
         }
     }
 
@@ -212,7 +228,7 @@ impl Config {
 
 fn ir_output<'a, T>(instrs: T, globals: &IndexVec<GlobalId, Rc<str>>) -> String
 where
-    T: IntoIterator<Item = &'a InstrKind>,
+    T: IntoIterator<Item = &'a Instr>,
 {
     let mut output = String::new();
     for instr in instrs {

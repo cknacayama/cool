@@ -289,8 +289,8 @@ impl TypeId {
     pub fn to_ir_type(self) -> &'static str {
         match self {
             TypeId::INT => "i64",
-            TypeId::BOOL => "u8",
-            TypeId::STRING => "type { i8 ptr, i64 }",
+            TypeId::BOOL => "i1",
+            TypeId::STRING => "type { ptr, i64 }",
             _ => "type { ptr, ptr }",
         }
     }
