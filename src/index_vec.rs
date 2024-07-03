@@ -22,6 +22,14 @@ pub trait Idx: Copy + 'static + Eq + PartialEq + Hash {
     }
 
     #[inline]
+    fn minus(self, decrement: usize) -> Option<Self> {
+        match self.index() {
+            0 => None,
+            index => Some(Self::new(index - decrement)),
+        }
+    }
+
+    #[inline]
     fn next(&mut self) -> Self {
         let next = *self;
         *self = self.plus(1);
@@ -30,11 +38,7 @@ pub trait Idx: Copy + 'static + Eq + PartialEq + Hash {
 
     #[inline]
     fn prev(self) -> Option<Self> {
-        if self.index() == 0 {
-            None
-        } else {
-            Some(Self::new(self.index() - 1))
-        }
+        self.minus(1)
     }
 }
 
@@ -333,7 +337,7 @@ pub(crate) use index_vec;
 
 #[derive(Debug, Clone)]
 pub struct Iter<'a, K: Idx, V> {
-    values:  std::slice::Iter<'a, V>,
+    values:  core::slice::Iter<'a, V>,
     current: K,
 }
 

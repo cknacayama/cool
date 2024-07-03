@@ -13,7 +13,7 @@ pub mod builder;
 pub mod opt;
 pub mod types;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Value {
     #[default]
     Void,
@@ -21,7 +21,17 @@ pub enum Value {
     Id(IrId),
     Int(i64),
     Bool(bool),
-    Str(Rc<str>),
+}
+
+impl Value {
+    pub fn to_llvm_string(&self) -> String {
+        match self {
+            Value::Id(id) => format!("{}", id),
+            Value::Int(val) => format!("{}", val),
+            Value::Bool(val) => format!("{}", val),
+            Value::Void => "{ ptr null, ptr null }".to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -32,8 +42,20 @@ impl fmt::Display for Value {
             Value::Id(id) => write!(f, "{}", id),
             Value::Int(val) => write!(f, "${}", val),
             Value::Bool(val) => write!(f, "${}", val),
-            Value::Str(val) => write!(f, "${:?}", val),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StringId(u32);
+
+impl Idx for StringId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    fn new(index: usize) -> Self {
+        Self(index as u32)
     }
 }
 
@@ -41,9 +63,9 @@ impl fmt::Display for Value {
 pub enum Instr {
     Nop,
 
-    Vtable(GlobalId, Box<[GlobalId]>),
+    Vtable(GlobalId, Box<[Option<GlobalId>]>),
     Function {
-        id:     IrId,
+        id:     GlobalId,
         ret:    Type,
         params: Box<[(Type, IrId)]>,
     },
@@ -67,10 +89,17 @@ pub enum Instr {
     AssignUn {
         dst: IrId,
         op:  UnOp,
+        ty:  Type,
         src: IrId,
     },
     AssignCall(IrId, Type, IrId, Box<[(Type, Value)]>),
-    AssignExtract(IrId, IrId, usize),
+    AssignExtract {
+        dst:    IrId,
+        src_ty: Type,
+        src:    IrId,
+        ty:     Type,
+        offset: usize,
+    },
     AssignInsert {
         dst: IrId,
         ty:  Type,
@@ -78,16 +107,20 @@ pub enum Instr {
         val: Value,
         idx: usize,
     },
-    Phi(IrId, Vec<(Value, BlockId)>),
+    AssignGep {
+        dst:    IrId,
+        src:    IrId,
+        offset: usize,
+    },
+    AssignPhi(IrId, Vec<(Value, BlockId)>),
 
     // before mem2reg
     Local(Type, IrId),
 
     AssignLoad {
-        dst:    IrId,
-        ty:     Type,
-        src:    IrId,
-        offset: usize,
+        dst: IrId,
+        ty:  Type,
+        src: IrId,
     },
     Store {
         dst: IrId,
@@ -110,22 +143,30 @@ impl Instr {
     }
 
     pub fn is_phi(&self) -> bool {
-        matches!(self, Self::Phi(_, _))
+        matches!(self, Self::AssignPhi(_, _))
     }
 
     pub fn uses(&self) -> (Option<IrId>, Option<Box<[IrId]>>) {
         match self {
             Self::Nop | Self::Label(_) | Self::Jmp(_) => (None, None),
 
-            Self::Function { id, params, .. } => {
-                (Some(*id), Some(params.iter().map(|(_, id)| *id).collect()))
-            }
+            Self::Function { id, params, .. } => (
+                Some(IrId::Global(*id)),
+                Some(params.iter().map(|(_, id)| *id).collect()),
+            ),
 
             Self::Local(_, id) => (Some(*id), None),
 
             Self::Vtable(dst, ids) => (
                 Some(IrId::Global(*dst)),
-                Some(ids.iter().copied().map(IrId::Global).collect()),
+                Some(
+                    ids.iter()
+                        .filter_map(|id| match id {
+                            Some(id) => Some(IrId::Global(*id)),
+                            None => None,
+                        })
+                        .collect(),
+                ),
             ),
 
             Self::JmpCond { src, .. } => (None, Some([*src].into())),
@@ -172,7 +213,8 @@ impl Instr {
             | Self::AssignUn { dst, src, .. }
             | Self::Assign(dst, Value::Id(src))
             | Self::AssignLoad { dst, src, .. }
-            | Self::AssignExtract(dst, src, _) => (Some(*dst), Some([*src].into())),
+            | Self::AssignExtract { dst, src, .. }
+            | Self::AssignGep { dst, src, .. } => (Some(*dst), Some([*src].into())),
 
             Self::Assign(dst, _) | Self::AssignBin { dst, .. } => (Some(*dst), None),
 
@@ -190,7 +232,7 @@ impl Instr {
                 (Some(*dst), Some(used_ids.into_boxed_slice()))
             }
 
-            Self::Phi(dst, vals) => (
+            Self::AssignPhi(dst, vals) => (
                 Some(*dst),
                 Some(
                     vals.iter()
@@ -215,7 +257,10 @@ impl fmt::Display for Instr {
             Instr::Vtable(dst, ids) => {
                 write!(f, "{} = [", dst)?;
                 for (i, id) in ids.iter().enumerate() {
-                    write!(f, "{}", id)?;
+                    match id {
+                        Some(id) => write!(f, "{}", id)?,
+                        None => write!(f, "null")?,
+                    }
                     if i != ids.len() - 1 {
                         write!(f, ", ")?;
                     }
@@ -246,8 +291,8 @@ impl fmt::Display for Instr {
             Instr::AssignBin { op, dst, lhs, rhs } => {
                 write!(f, "    {} = {} {}, {}", dst, op.to_ir_string(), lhs, rhs)
             }
-            Instr::AssignUn { op, dst, src } => {
-                write!(f, "    {} = {} {}", dst, op.to_ir_string(), src)
+            Instr::AssignUn { op, dst, ty, src } => {
+                write!(f, "    {} = {} {} {}", dst, op.to_ir_string(), ty, src)
             }
             Instr::AssignCall(id, ty, func, args) => {
                 write!(f, "    {} = call {} {}(", id, ty, func)?;
@@ -259,8 +304,18 @@ impl fmt::Display for Instr {
                 }
                 write!(f, ")")
             }
-            Instr::AssignExtract(id, obj, index) => {
-                write!(f, "    {} = extract {}, {}", id, obj, index)
+            Instr::AssignExtract {
+                dst,
+                src_ty,
+                src,
+                ty,
+                offset,
+            } => {
+                write!(
+                    f,
+                    "    {} = extract {} {}, {}, {}",
+                    dst, src_ty, src, ty, offset
+                )
             }
             Instr::AssignInsert {
                 dst,
@@ -271,7 +326,10 @@ impl fmt::Display for Instr {
             } => {
                 write!(f, "    {} = insert {} {}, {}, {}", dst, ty, src, val, idx)
             }
-            Instr::Phi(id, vals) => {
+            Instr::AssignGep { dst, src, offset } => {
+                write!(f, "    {} = gep {}, {}", dst, src, offset)
+            }
+            Instr::AssignPhi(id, vals) => {
                 write!(f, "    {} = phi ", id)?;
                 for (i, (val, block)) in vals.iter().enumerate() {
                     write!(f, "[{}, block{}]", val, block)?;
@@ -282,13 +340,8 @@ impl fmt::Display for Instr {
                 Ok(())
             }
             Instr::Local(ty, name) => write!(f, "    local {} {}", ty, name),
-            Instr::AssignLoad {
-                dst,
-                ty: size,
-                src,
-                offset,
-            } => {
-                write!(f, "    {} = load {} {}, {}", dst, size, src, offset)
+            Instr::AssignLoad { dst, ty, src } => {
+                write!(f, "    {} = load {} {}", dst, ty, src)
             }
             Instr::Store { dst, ty: size, src } => {
                 write!(f, "    store {}, {} {}", dst, size, src)
@@ -321,8 +374,37 @@ impl Idx for IrId {
         }
     }
 
-    fn new(index: usize) -> Self {
-        Self::Tmp(index as u32)
+    fn new(_: usize) -> Self {
+        panic!()
+    }
+
+    #[inline]
+    fn plus(self, increment: usize) -> Self {
+        match self {
+            Self::Tmp(subs) => Self::Tmp(subs + increment as u32),
+            Self::Renamed(subs) => Self::Renamed(subs + increment as u32),
+            Self::Local(LocalId(subs)) => Self::Local(LocalId(subs + increment as u32)),
+            Self::Ptr(LocalId(subs)) => Self::Ptr(LocalId(subs + increment as u32)),
+            Self::Global(GlobalId(subs)) => Self::Global(GlobalId(subs + increment as u32)),
+        }
+    }
+
+    #[inline]
+    fn minus(self, decrement: usize) -> Option<Self> {
+        match self {
+            Self::Tmp(subs) if subs > 0 => Some(Self::Tmp(subs - decrement as u32)),
+            Self::Renamed(subs) if subs > 0 => Some(Self::Renamed(subs - decrement as u32)),
+            Self::Local(LocalId(subs)) if subs > 0 => {
+                Some(Self::Local(LocalId(subs - decrement as u32)))
+            }
+            Self::Ptr(LocalId(subs)) if subs > 0 => {
+                Some(Self::Ptr(LocalId(subs - decrement as u32)))
+            }
+            Self::Global(GlobalId(subs)) if subs > 0 => {
+                Some(Self::Global(GlobalId(subs - decrement as u32)))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -375,7 +457,7 @@ impl fmt::Display for IrId {
             Self::Local(LocalId(subs)) => write!(f, "%local_{}", subs),
             Self::Ptr(LocalId(subs)) => write!(f, "%ptr_{}", subs),
             Self::Global(GlobalId(subs)) => write!(f, "@globl_{}", subs),
-            Self::Renamed(subs) => write!(f, "%{}", subs),
+            Self::Renamed(subs) => write!(f, "%r{}", subs),
         }
     }
 }
@@ -445,7 +527,10 @@ impl Instr {
             Instr::Vtable(dst, ids) => {
                 let mut s = format!("@{} = [", globals[*dst]);
                 for (i, id) in ids.iter().enumerate() {
-                    s.push_str(&format!("@{}", globals[*id]));
+                    match id {
+                        Some(id) => s.push_str(&format!("@{}", globals[*id])),
+                        None => s.push_str("null"),
+                    }
                     if i != ids.len() - 1 {
                         s.push_str(", ");
                     }
@@ -454,7 +539,7 @@ impl Instr {
                 s
             }
             Instr::Function { id, ret, params } => {
-                let mut s = format!("fn {} {}(", ret, id.to_ir_string(globals));
+                let mut s = format!("fn {} {}(", ret, globals[*id]);
                 for (i, (ty, id)) in params.iter().enumerate() {
                     s.push_str(&format!("{} {}", ty, id.to_ir_string(globals)));
                     if i != params.len() - 1 {
@@ -489,11 +574,12 @@ impl Instr {
                     rhs.to_ir_string(globals)
                 )
             }
-            Instr::AssignUn { op, dst, src } => {
+            Instr::AssignUn { op, dst, ty, src } => {
                 format!(
-                    "    {} = {} {}",
+                    "    {} = {} {} {}",
                     dst,
                     op.to_ir_string(),
+                    ty,
                     src.to_ir_string(globals)
                 )
             }
@@ -508,12 +594,20 @@ impl Instr {
                 s.push(')');
                 s
             }
-            Instr::AssignExtract(id, obj, index) => {
+            Instr::AssignExtract {
+                dst,
+                src_ty,
+                src,
+                ty,
+                offset,
+            } => {
                 format!(
-                    "    {} = extract {}, {}",
-                    id,
-                    obj.to_ir_string(globals),
-                    index
+                    "    {} = extract {} {}, {}, {}",
+                    dst.to_ir_string(globals),
+                    src_ty,
+                    src.to_ir_string(globals),
+                    ty,
+                    offset
                 )
             }
             Instr::AssignInsert {
@@ -525,14 +619,22 @@ impl Instr {
             } => {
                 format!(
                     "    {} = insert {} {}, {}, {}",
-                    dst,
+                    dst.to_ir_string(globals),
                     ty,
                     src.to_ir_string(globals),
                     val.to_ir_string(globals),
                     idx
                 )
             }
-            Instr::Phi(id, vals) => {
+            Instr::AssignGep { dst, src, offset } => {
+                format!(
+                    "    {} = gep {}, {}",
+                    dst.to_ir_string(globals),
+                    src.to_ir_string(globals),
+                    offset
+                )
+            }
+            Instr::AssignPhi(id, vals) => {
                 let mut s = format!("    {} = phi ", id);
                 for (i, (val, block)) in vals.iter().enumerate() {
                     s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
@@ -543,19 +645,8 @@ impl Instr {
                 s
             }
             Instr::Local(ty, name) => format!("    local {} {}", ty, name),
-            Instr::AssignLoad {
-                dst,
-                ty,
-                src,
-                offset,
-            } => {
-                format!(
-                    "    {} = load {} {}, {}",
-                    dst,
-                    ty,
-                    src.to_ir_string(globals),
-                    offset
-                )
+            Instr::AssignLoad { dst, ty, src } => {
+                format!("    {} = load {} {}", dst, ty, src.to_ir_string(globals),)
             }
             Instr::Store { dst, ty, src } => {
                 format!("    store {}, {} {}", dst.to_ir_string(globals), ty, src)

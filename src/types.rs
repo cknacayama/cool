@@ -469,16 +469,10 @@ impl<'a> ObjectEnv<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ClassEnv<'a> {
     types:   FxHashMap<Type<'a>, TypeId>,
     classes: IndexVec<TypeId, ClassTypeData<'a>>,
-}
-
-impl<'a> Default for ClassEnv<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl<'a> ClassEnv<'a> {
@@ -706,16 +700,16 @@ impl<'a> ClassEnv<'a> {
         }
     }
 
-    pub fn classes(&self) -> impl Iterator<Item = (TypeId, &ClassTypeData<'a>)> {
-        self.classes.iter()
+    pub fn classes(&self) -> &IndexVec<TypeId, ClassTypeData<'a>> {
+        &self.classes
     }
 
-    pub fn get_class(&self, ty: TypeId) -> Result<&ClassTypeData<'a>, TypeErrorKind<'a>> {
-        Ok(self.classes.get(ty).unwrap())
+    pub fn get_class(&self, ty: TypeId) -> &ClassTypeData<'a> {
+        self.classes.get(ty).unwrap()
     }
 
-    pub fn get_class_name(&self, ty: TypeId) -> Result<&'a str, TypeErrorKind<'a>> {
-        Ok(self.classes.get(ty).unwrap().id)
+    pub fn get_class_name(&self, ty: TypeId) -> &'a str {
+        self.classes.get(ty).unwrap().id
     }
 
     pub fn insert_class_id(

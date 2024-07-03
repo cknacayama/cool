@@ -266,8 +266,17 @@ impl<'a> Parser<'a> {
             },
             span,
         );
+        let copy = Feature::new(
+            FeatureKind::Method {
+                id:        "copy",
+                params:    Box::new([]),
+                return_ty: Type::SelfType,
+                body:      Expr::new(ExprKind::SelfId, span),
+            },
+            span,
+        );
 
-        vec![type_name]
+        vec![type_name, copy]
     }
 
     fn parse_feature(&mut self) -> ParseResult<Feature<'a>> {

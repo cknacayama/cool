@@ -5,6 +5,7 @@ use crate::{
     index_vec::IndexVec,
     ir::{builder::IrBuilder, opt::IrOptmizer, GlobalId, Instr},
     lexer::Lexer,
+    llvm::compiler::Compiler,
     parser::Parser,
 };
 
@@ -15,9 +16,9 @@ pub enum Mode {
     Check,
     Ir,
 
-    #[default]
     Opt,
 
+    #[default]
     Llvm,
 }
 
@@ -203,8 +204,21 @@ impl Config {
                     functions,
                     vtables,
                     globals,
+                    strings,
                 } = ir_opt;
-                todo!()
+
+                let functions = functions
+                    .into_iter()
+                    .map(|f| f.function)
+                    .collect::<Vec<_>>();
+
+                let mut compiler = Compiler::new(globals, vtables, strings);
+
+                for func in functions {
+                    compiler.compile_fn(&func);
+                }
+
+                Ok(compiler.finish())
             }
         }
     }

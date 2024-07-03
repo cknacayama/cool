@@ -138,7 +138,7 @@ impl<'a> Checker<'a> {
             .get_type_or_err(&parent)
             .map_err(|kind| TypeError::new(kind, span))?;
 
-        let parent_data = self.class_env.get_class(parent).unwrap();
+        let parent_data = self.class_env.get_class(parent);
 
         let mut vtable = parent_data.vtable().to_vec();
         vtable[0].0 = parent;
@@ -166,7 +166,7 @@ impl<'a> Checker<'a> {
         let mut attrs = vec![];
         let mut methods = vec![];
 
-        for feature in features {
+        for feature in features.into_vec() {
             match feature.kind {
                 FeatureKind::Method {
                     id,
@@ -821,7 +821,7 @@ impl<'a> PrototypeChecker<'a> {
         let parent_data = self
             .env
             .as_ref()
-            .and_then(|env| env.get_class(parent_id).ok())
+            .map(|env| env.get_class(parent_id))
             .unwrap();
 
         let mut vtable = parent_data.vtable().to_vec();

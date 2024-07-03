@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{index_vec::Idx, types::TypeId};
+use crate::index_vec::Idx;
 
 use super::Instr;
 

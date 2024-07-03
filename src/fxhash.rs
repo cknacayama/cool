@@ -55,8 +55,8 @@ impl FxHasher {
 impl Hasher for FxHasher {
     #[inline]
     fn write(&mut self, mut bytes: &[u8]) {
-        const _: () = assert!(size_of::<usize>() <= size_of::<u64>());
-        const _: () = assert!(size_of::<u32>() <= size_of::<usize>());
+        let _ = const { assert!(size_of::<usize>() <= size_of::<u64>()) };
+        let _ = const { assert!(size_of::<u32>() <= size_of::<usize>()) };
 
         let mut state = self.clone();
         while let Some(&usize_bytes) = take_first_chunk(&mut bytes) {

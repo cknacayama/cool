@@ -112,7 +112,7 @@ impl Function {
         let iter = self
             .instrs_block_iter_mut(block)
             .filter_map(|(id, instr)| match instr {
-                Instr::Phi(_, args) => Some((id, args)),
+                Instr::AssignPhi(_, args) => Some((id, args)),
                 _ => None,
             });
 
@@ -194,10 +194,10 @@ impl Function {
 
 #[derive(Debug)]
 pub struct FunctionOptmizer {
-    function: Function,
-    locals:   IndexVec<LocalId, (TypeId, BlockId)>,
-    idoms:    ImmediateDominators,
-    dom_tree: DominatorTree,
+    pub(crate) function: Function,
+    locals:              IndexVec<LocalId, (TypeId, BlockId)>,
+    idoms:               ImmediateDominators,
+    dom_tree:            DominatorTree,
 }
 
 impl FunctionOptmizer {
@@ -404,7 +404,7 @@ impl FunctionOptmizer {
                     *on_true = new_blocks[*on_true];
                     *on_false = new_blocks[*on_false];
                 }
-                Instr::Phi(_, vals) => {
+                Instr::AssignPhi(_, vals) => {
                     vals.iter_mut().for_each(|(_, block)| {
                         *block = new_blocks[*block];
                     });
@@ -449,7 +449,7 @@ impl FunctionOptmizer {
                         *on_false = new_target
                     }
                 }
-                Instr::Phi(id, vals) => {
+                Instr::AssignPhi(id, vals) => {
                     vals.retain_mut(|(_, block)| match new_blocks[*block] {
                         Some(new_block) => {
                             *block = new_block;
@@ -683,7 +683,7 @@ impl FunctionOptmizer {
             }
             self.instrs_mut()
                 .extend(phis.into_iter().map(|(local, args, _)| {
-                    Instr::Phi(
+                    Instr::AssignPhi(
                         IrId::Local(local),
                         args.into_vec()
                             .into_iter()
@@ -819,7 +819,7 @@ impl Instr {
                     *param = new_id;
                     update_var_use_decl(uses, new_id, instr_id);
                 }
-                update_var_use_decl(uses, *id, instr_id);
+                update_var_use_decl(uses, IrId::Global(*id), instr_id);
             }
 
             Self::Local(_, _) => {
@@ -834,6 +834,14 @@ impl Instr {
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
+                    let cur_id = renames.get(id).unwrap().last().unwrap();
+                    *id = *cur_id;
+                    update_var_uses(uses, cur_id, instr_id);
+                }
+            }
+
+            Self::Store { dst, src, .. } if dst.is_global() => {
+                if let Value::Id(id) = src {
                     let cur_id = renames.get(id).unwrap().last().unwrap();
                     *id = *cur_id;
                     update_var_uses(uses, cur_id, instr_id);
@@ -873,10 +881,7 @@ impl Instr {
                 }
             },
 
-            Self::AssignLoad { dst, src, .. } if src.is_ptr() => {
-                let cur_id2 = renames.get(src).unwrap().last().unwrap();
-                *src = *cur_id2;
-                update_var_uses(uses, cur_id2, instr_id);
+            Self::AssignLoad { dst, src, .. } if src.is_global() => {
                 let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
@@ -885,13 +890,25 @@ impl Instr {
                 return Some(old_id);
             }
 
-            Self::AssignLoad { dst, src, .. } => {
+            Self::AssignLoad { dst, src, .. } if src.is_local() => {
                 let cur_id2 = *renames.get(src).unwrap().last().unwrap();
                 let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
                 *self = Self::Assign(new_id, Value::Id(cur_id2));
                 update_var_uses(uses, &cur_id2, instr_id);
+                update_var_use_decl(uses, new_id, instr_id);
+                return Some(old_id);
+            }
+
+            Self::AssignLoad { dst, src, .. } => {
+                let cur_id2 = renames.get(src).unwrap().last().unwrap();
+                *src = *cur_id2;
+                update_var_uses(uses, cur_id2, instr_id);
+                let new_id = tmp.next();
+                let old_id = *dst;
+                renames.entry(old_id).or_default().push(new_id);
+                *dst = new_id;
                 update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
             }
@@ -949,7 +966,8 @@ impl Instr {
                 rhs: Value::Id(src),
                 ..
             }
-            | Self::AssignExtract(dst, src, _) => {
+            | Self::AssignExtract { dst, src, .. }
+            | Self::AssignGep { dst, src, .. } => {
                 let cur_id = renames.get(src).unwrap().last().unwrap();
                 *src = *cur_id;
                 update_var_uses(uses, cur_id, instr_id);
@@ -983,7 +1001,7 @@ impl Instr {
                 return Some(old_id);
             }
 
-            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::Phi(dst, _) => {
+            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::AssignPhi(dst, _) => {
                 let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
@@ -1020,7 +1038,7 @@ impl Instr {
                 self.replace_with_nop();
                 Some(folded)
             }
-            Instr::AssignUn { op, dst, src } => {
+            Instr::AssignUn { op, dst, src, .. } => {
                 let op = *op;
                 let dst = *dst;
                 Self::try_replace_id(values, src);
@@ -1074,15 +1092,15 @@ impl Instr {
                 None
             }
 
-            Instr::AssignExtract(_, id, _) => {
-                Self::try_replace_id(values, id);
+            Instr::AssignExtract { src, .. } | Instr::AssignGep { src, .. } => {
+                Self::try_replace_id(values, src);
                 None
             }
             Instr::AssignInsert { val, .. } => {
                 Self::try_replace(values, val);
                 None
             }
-            Instr::Phi(_, vals) => {
+            Instr::AssignPhi(_, vals) => {
                 for (val, _) in vals.iter_mut() {
                     Self::try_replace(values, val);
                 }
@@ -1146,7 +1164,7 @@ impl Instr {
     fn const_fold_un(values: &mut FxHashMap<IrId, Value>, op: UnOp, id: IrId, arg: &IrId) -> bool {
         match op {
             UnOp::IsVoid => match values.get(arg) {
-                Some(Value::Int(_) | Value::Str(_) | Value::Bool(_)) => {
+                Some(Value::Int(_) | Value::Bool(_)) => {
                     values.insert(id, Value::Bool(false));
                     true
                 }
@@ -1227,14 +1245,16 @@ pub struct IrOptmizer {
     pub functions: Vec<FunctionOptmizer>,
     pub vtables:   Vec<Instr>,
     pub globals:   IndexVec<GlobalId, Rc<str>>,
+    pub strings:   FxHashMap<GlobalId, Rc<str>>,
 }
 
 impl IrOptmizer {
     pub fn from_builder(builder: IrBuilder) -> Self {
         let mut functions = vec![];
-        let empty_string = builder.strings().get("").unwrap().clone();
+        let empty_string = builder.strings().get_key_value("").unwrap().0.clone();
         let mut globals = index_vec![empty_string; builder.globals.len()];
         let mut vtables = vec![];
+        let mut strings = FxHashMap::default();
 
         for (id, global) in builder.globals.into_iter() {
             match global.value {
@@ -1242,7 +1262,10 @@ impl IrOptmizer {
                 Some(GlobalValue::Function(function)) => {
                     functions.push(FunctionOptmizer::from_builder(function))
                 }
-                _ => {}
+                Some(GlobalValue::String(string)) => {
+                    strings.insert(id, string);
+                }
+                None => {}
             }
             globals[id] = global.name;
         }
@@ -1251,6 +1274,7 @@ impl IrOptmizer {
             functions,
             vtables,
             globals,
+            strings,
         }
     }
 

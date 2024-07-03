@@ -1,40 +1,82 @@
     .intel_syntax noprefix
+    .data
+Object.Typename:
+    .string "Object"
+    .align 8
+Object.Typenamelen:
+    .quad 6
+
+IO.Typename:
+    .string "IO"
+    .align 8
+IO.Typenamelen:
+    .quad 2
+
+String.Typename:
+    .string "String"
+    .align 8
+String.Typenamelen:
+    .quad 6
+
+Int.Typename:
+    .string "Int"
+    .align 8
+Int.Typenamelen:
+    .quad 3
+
+Bool.Typename:
+    .string "Bool"
+    .align 8
+Bool.Typenamelen:
+    .quad 4
+
+Allocator.Typename:
+    .string "Allocator"
+    .align 8
+Allocator.Typenamelen:
+    .quad 9
+
+empty_string:
+    .string ""
+    .align 8
+empty_string_len:
+    .quad 0
+
+io_out_int_buf_size:
+    .quad 21
+
+    .bss 
+heap_pos:
+    .quad 0
+io_out_int_buf:
+    .skip 21
+
     .text
     .globl _start
 _start:
-    sub     rsp, 8
     push    rbp
     mov     rbp, rsp
 
     call    allocator.init
 
     # (new Main).main()
-    push    0
+    mov     rdi, 0
+    call    allocator.alloc
+
+    mov     rdi, rax
     call    Main.new
-    add     rsp, 8
-    push    rdx
-    push    rax
+    mov     rdi, rax
+    mov     rsi, rdx
     call    Main.main
-    add     rsp, 16
 
     pop     rbp
-    add     rsp, 8
-
     mov     rax, 60 # exit
     mov     rdi, 0
     syscall
 
     .globl Object.new
 Object.new:
-    cmp     QWORD PTR [rsp + 8], 0
-    jne     .Object.new_L1
-    push    0
-    call    allocator.alloc
-    add     rsp, 8
-    jmp     .Object.new_L2
-.Object.new_L1:
-    mov     rax, QWORD PTR [rsp + 8]
-.Object.new_L2:
+    mov     rax, rdi
     lea     rdx, QWORD PTR [rip + Object.Table]
     ret
 
@@ -46,31 +88,37 @@ Object.abort:
 
     .globl Object.type_name
 Object.type_name:
-    mov     rax, QWORD PTR [rip + Object.Typenamelen]
-    lea     rdx, QWORD PTR [rip + Object.Typename]
+    lea     rax, QWORD PTR [rip + Object.Typename]
+    mov     rdx, QWORD PTR [rip + Object.Typenamelen]
     ret
 
     .globl Object.copy
 Object.copy:
-    mov     rax, QWORD PTR [rsp + 8]
-    mov     rdx, QWORD PTR [rsp + 16]
+    mov     rax, rdi
+    mov     rdx, rsi
     ret
 
     .globl String.new
 String.new:
-    mov     rax, 0
-    lea     rdx, QWORD PTR [rip + empty_string]
+    lea     rax, QWORD PTR [rip + empty_string]
+    mov     rdx, 0
     ret
 
     .globl String.type_name
 String.type_name:
-    mov     rax, QWORD PTR [rip + String.Typenamelen]
-    lea     rdx, QWORD PTR [rip + String.Typename]
+    lea     rax, QWORD PTR [rip + String.Typename]
+    mov     rdx, QWORD PTR [rip + String.Typenamelen]
+    ret
+
+    .globl String.copy
+String.copy:
+    mov     rax, rdi
+    mov     rdx, rsi
     ret
 
     .globl String.length
 String.length:
-    mov     rax, QWORD PTR [rsp + 8]
+    mov     rax, rsi
     ret
 
     .globl String.concat
@@ -78,57 +126,61 @@ String.concat:
     push    rbp
     mov     rbp, rsp
 
-    sub     rsp, 16
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
 
-    mov     rax, QWORD PTR [rbp + 16] # self.length
-    add     rax, QWORD PTR [rbp + 32] # other.length
-    mov     QWORD PTR [rbp - 8], rax # new.length
+    mov     rbx, rsi
+    add     rbx, rcx # new.lenght = other.length + self.lenght
+    mov     r12, rdi # self.content
+    mov     r13, rsi # self.lenght
+    mov     r14, rdx # other.content
+    mov     r15, rcx # other.len
 
-    push    rax
+    mov     rdi, rbx
     call    allocator.alloc
-    add     rsp, 8
-    mov     QWORD PTR [rbp - 16], rax # new.content
 
-    push    QWORD PTR [rbp + 16] # self.length
-    push    QWORD PTR [rbp + 24] # self.content
-    # new.content
-    push    rax
+    mov     rdi, rax
+    mov     rsi, r12
+    mov     rdx, r13
     call    memory.copy
-    add     rsp, 24
 
-    push    QWORD PTR [rbp + 32] # other.length
-    push    QWORD PTR [rbp + 40] # other.content
-    mov     rdi, QWORD PTR [rbp + 16] # self.length
-    add     rdi, rax # new.content+self.length
-    push    rdi
+    mov     rdi, r13 # self.length
+    add     rdi, rax # new.content + self.length
+    mov     rsi, r14
+    mov     rdx, r15
     call    memory.copy
-    add     rsp, 24
 
-    mov     rax, QWORD PTR [rbp - 8] # new.length
-    mov     rdx, QWORD PTR [rbp - 16] # new.content
+    mov     rdx, rbx
 
-    add     rsp, 16
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
 
     pop     rbp
     ret
 
     .globl String.substr
 String.substr:
-    mov     rax, QWORD PTR [rsp + 32] # l
-    mov     rdx, QWORD PTR [rsp + 16] # self.content
-    add     rdx, QWORD PTR [rsp + 24] # i
+    mov     rax, rdi # self.content
+    add     rax, rdx # i
+    mov     rdx, rsi # l
     ret
 
-    .globl String.To_Object
-String.To_Object:
-    push    16
-    call    allocator.alloc
-    add     rsp, 8
+    .globl String.Cast
+String.Cast:
+    push    rdi
+    push    rsi
 
-    mov     rdi, QWORD PTR [rsp + 8] # length
-    mov     QWORD PTR [rax], rdi
-    mov     rdi, QWORD PTR [rsp + 16] # content
-    mov     QWORD PTR [rax + 8], rdi
+    mov     rdi, 16
+    call    allocator.alloc
+
+    pop     QWORD PTR [rax + 8]
+    pop     QWORD PTR [rax]
     lea     rdx, QWORD PTR [rip + String.Table]
 
     ret
@@ -140,25 +192,24 @@ Int.new:
 
     .globl Int.type_name
 Int.type_name:
-    mov     rax, QWORD PTR [rip + Int.Typenamelen]
-    lea     rdx, QWORD PTR [rip + Int.Typename]
+    lea     rax, QWORD PTR [rip + Int.Typename]
+    mov     rdx, QWORD PTR [rip + Int.Typenamelen]
     ret
 
     .globl Int.copy
 Int.copy:
-    mov     rax, QWORD PTR [rsp + 8]
+    mov     rax, rdi
     ret
 
-    .globl Int.To_Object
-Int.To_Object:
-    push    8
+    .globl Int.Cast
+Int.Cast:
+    push    rdi
+
+    mov     rdi, 8
     call    allocator.alloc
-    add     rsp, 8
 
-    mov     rdi, QWORD PTR [rsp + 8]
-    mov     QWORD PTR [rax], rdi
+    pop     QWORD PTR [rax]
     lea     rdx, QWORD PTR [rip + Int.Table]
-
     ret
 
     .globl Bool.new
@@ -168,22 +219,23 @@ Bool.new:
 
     .globl Bool.type_name
 Bool.type_name:
-    mov     rax, QWORD PTR [rip + Bool.Typenamelen]
-    lea     rdx, QWORD PTR [rip + Bool.Typename]
+    lea     rax, QWORD PTR [rip + Bool.Typename]
+    mov     rdx, QWORD PTR [rip + Bool.Typenamelen]
     ret
 
     .globl Bool.copy
 Bool.copy:
-    mov     rax, QWORD PTR [rsp + 8]
+    mov     rax, rdi
     ret
 
-    .globl Bool.To_Object
-Bool.To_Object:
-    push    1
-    call    allocator.alloc
-    add     rsp, 8
+    .globl Bool.Cast
+Bool.Cast:
+    push    rdi
 
-    mov     rdi, QWORD PTR [rsp + 8]
+    mov     rdi, 1
+    call    allocator.alloc
+
+    pop     rdi
     mov     BYTE PTR [rax], sil
     lea     rdx, QWORD PTR [rip + Bool.Table]
 
@@ -191,36 +243,35 @@ Bool.To_Object:
 
     .globl IO.new
 IO.new:
-    cmp     QWORD PTR [rsp + 8], 0
-    jne     .IO.new_L1
-    push    0
-    call    allocator.alloc
-    add     rsp, 8
-    jmp     .IO.new_L2
-.IO.new_L1:
-    mov     rax, QWORD PTR [rsp + 8]
-.IO.new_L2:
+    mov     rax, rdi
     lea     rdx, QWORD PTR [rip + IO.Table]
-
     ret
 
     .globl IO.type_name
 IO.type_name:
-    mov     rax, QWORD PTR [rip + IO.Typenamelen]
-    lea     rdx, QWORD PTR [rip + IO.Typename]
+    lea     rax, QWORD PTR [rip + IO.Typename]
+    mov     rdx, QWORD PTR [rip + IO.Typenamelen]
+    ret
+
+    .globl IO.copy
+IO.copy:
+    mov     rax, rdi
+    mov     rdx, rsi
     ret
 
     .globl IO.out_string
 IO.out_string:
+    push    rdi
+    push    rsi
+
+    mov     rsi, rdx
+    mov     rdx, rcx
     mov     rax, 1
     mov     rdi, 1
-    mov     rsi, QWORD PTR [rsp + 32] # content
-    mov     rdx, QWORD PTR [rsp + 24] # length
     syscall
 
-    mov     rax, QWORD PTR [rsp + 8]
-    mov     rdx, QWORD PTR [rsp + 16]
-
+    pop     rdx
+    pop     rax
     ret
 
 # TODO: implement IO.out_int
@@ -273,6 +324,34 @@ IO.in_int:
 
     ret
 
+    .globl Allocator.new
+Allocator.new:
+    mov     rax, rdi
+    lea     rdx, QWORD PTR [rip + Allocator.Table]
+    ret
+
+    .globl Allocator.type_name
+Allocator.type_name:
+    lea     rax, QWORD PTR [rip + Allocator.Typename]
+    mov     rdx, QWORD PTR [rip + Allocator.Typenamelen]
+    ret
+
+    .globl Allocator.copy
+Allocator.copy:
+    mov     rax, rdi
+    mov     rdx, rsi
+    ret
+
+    .globl Allocator.alloc
+Allocator.alloc:
+    mov     rdi, rdx
+    call    allocator.alloc
+    ret
+
+    .globl Allocator.free
+Allocator.free:
+    ret
+
     .globl allocator.init
 #   void allocator.init(void);
 allocator.init:
@@ -285,11 +364,10 @@ allocator.init:
     .globl allocator.alloc
 #   void *allocator.alloc(size_t size);
 allocator.alloc:
-    cmp     QWORD PTR [rsp + 8], 0
+    cmp     rdi, 0
     je      .allocator.alloc_L1
     mov     rax, 12 # sys_brk
     # align size to 8 bytes
-    mov     rdi, QWORD PTR [rsp + 8]
     add     rdi, 7
     and     rdi, -8
     # heap_pos + ALIGN(size)

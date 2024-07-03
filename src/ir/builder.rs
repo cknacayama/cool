@@ -2,10 +2,10 @@ use std::rc::Rc;
 
 use crate::{
     ast::{
-        BinOp, TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
+        TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
         TypedMethod,
     },
-    fxhash::{FxHashMap, FxHashSet},
+    fxhash::FxHashMap,
     index_vec::{index_vec, Idx, IndexVec},
     types::{AttrData, ClassEnv, TypeId},
 };
@@ -16,23 +16,7 @@ use super::{
     GlobalId, Instr, IrId, LocalId, Value,
 };
 
-#[derive(Debug, Clone)]
-pub struct StringSet(FxHashSet<Rc<str>>);
-
-impl StringSet {
-    pub fn intern(&mut self, s: &str) -> Rc<str> {
-        if let Some(s) = self.0.get(s) {
-            return s.clone();
-        }
-        let s: Rc<str> = s.into();
-        self.0.insert(s.clone());
-        s
-    }
-
-    pub fn get(&self, s: &str) -> Option<&Rc<str>> {
-        self.0.get(s)
-    }
-}
+pub type StringMap = FxHashMap<Rc<str>, GlobalId>;
 
 #[derive(Debug)]
 pub struct FunctionBuilder<'a> {
@@ -212,21 +196,28 @@ impl<'a> FunctionBuilder<'a> {
         self.blocks.last_mut().unwrap().push_back(instr)
     }
 
-    fn set_attrs(&mut self, attrs: &[(&'a str, AttrData, usize)]) {
+    fn set_attrs(&mut self, attrs: &[(&'a str, AttrData, usize)], local_self: Option<IrId>) {
         if attrs.is_empty() {
             return;
         }
 
+        let local_self = local_self.unwrap_or(IrId::LOCAL_SELF);
+
         let tmp1 = self.new_tmp();
         let kind = Instr::AssignLoad {
-            dst:    tmp1,
-            ty:     Type::Object,
-            src:    IrId::LOCAL_SELF,
-            offset: 0,
+            dst: tmp1,
+            ty:  Type::Object,
+            src: local_self,
         };
         self.push_instr(kind);
         let tmp = self.new_tmp();
-        let kind = Instr::AssignExtract(tmp, tmp1, 0);
+        let kind = Instr::AssignExtract {
+            dst:    tmp,
+            src_ty: Type::Object,
+            src:    tmp1,
+            ty:     Type::Ptr,
+            offset: 0,
+        };
         self.push_instr(kind);
 
         for (name, data, offset) in attrs {
@@ -234,11 +225,10 @@ impl<'a> FunctionBuilder<'a> {
                 continue;
             }
             let ptr = self.new_ptr(name, data.ty);
-            let kind = Instr::AssignBin {
-                dst: ptr,
-                op:  BinOp::Add,
-                lhs: Value::Id(tmp),
-                rhs: Value::Int(*offset as i64),
+            let kind = Instr::AssignGep {
+                dst:    ptr,
+                src:    tmp,
+                offset: *offset,
             };
             self.push_instr(kind);
         }
@@ -315,6 +305,7 @@ impl<'a> FunctionBuilder<'a> {
 pub enum GlobalValue<'a> {
     Function(FunctionBuilder<'a>),
     Vtable(Instr),
+    String(Rc<str>),
 }
 
 #[derive(Debug)]
@@ -330,75 +321,64 @@ pub struct IrBuilder<'a> {
     env:                ClassEnv<'a>,
     globals_map:        FxHashMap<(TypeId, &'a str), GlobalId>,
     pub(super) globals: IndexVec<GlobalId, Global<'a>>,
-    strings:            StringSet,
+    strings:            StringMap,
     class_sizes:        IndexVec<TypeId, usize>,
 }
 
 impl<'a> IrBuilder<'a> {
     pub fn new(env: ClassEnv<'a>) -> Self {
-        let mut globals_map = FxHashMap::default();
-        let mut globals = IndexVec::new();
-        let mut strings = StringSet(FxHashSet::default());
-        strings.0.insert(Rc::from(""));
+        let globals_map = FxHashMap::default();
+        let globals = IndexVec::new();
+        let strings = FxHashMap::default();
 
-        let mut count = 0;
+        let mut class_sizes = index_vec![0; env.classes().len()];
+        class_sizes[TypeId::INT] = 8;
+        class_sizes[TypeId::BOOL] = 1;
+        class_sizes[TypeId::STRING] = 16;
+
+        let mut new = Self {
+            cur_class: TypeId::SelfType,
+            cur_function: GlobalId(0),
+            env: ClassEnv::default(),
+            globals_map,
+            globals,
+            strings,
+            class_sizes,
+        };
+
+        new.intern_string("");
+
         for (class, data) in env.classes() {
-            count += 1;
             let class_name = data.id();
             let vtable = match data.parent() {
                 Some(parent) => {
-                    let parent_vtable = globals_map[&(parent, "Table")];
-                    vec![parent_vtable]
+                    let parent_vtable = new.globals_map[&(parent, "Table")];
+                    vec![Some(parent_vtable)]
                 }
-                None => Vec::new(),
+                None => vec![None],
             };
             let vtable = data
                 .vtable()
                 .iter()
                 .skip(1) // parent vtable
                 .map(|(ty, function)| {
-                    let ty_name = env.get_class(*ty).unwrap().id();
-                    IrBuilder::new_function(
-                        &mut strings,
-                        &mut globals_map,
-                        &mut globals,
-                        *ty,
-                        ty_name,
-                        function,
-                    )
+                    let ty_name = env.get_class_name(*ty);
+                    new.new_function(*ty, ty_name, function)
                 })
                 .fold(vtable, |mut vtable, id| {
-                    vtable.push(id);
+                    vtable.push(Some(id));
                     vtable
                 })
                 .into_boxed_slice();
-            IrBuilder::new_vtable(
-                &mut strings,
-                &mut globals_map,
-                &mut globals,
-                class,
-                class_name,
-                vtable,
-            );
+            new.new_vtable(class, class_name, vtable);
         }
 
-        let mut class_sizes = index_vec![0; count];
-        class_sizes[TypeId::INT] = 8;
-        class_sizes[TypeId::BOOL] = 1;
-        class_sizes[TypeId::STRING] = 16;
+        new.env = env;
 
-        Self {
-            cur_class: TypeId::SelfType,
-            cur_function: GlobalId(0),
-            env,
-            globals_map,
-            globals,
-            strings,
-            class_sizes,
-        }
+        new
     }
 
-    pub fn strings(&self) -> &StringSet {
+    pub fn strings(&self) -> &StringMap {
         &self.strings
     }
 
@@ -514,64 +494,83 @@ impl<'a> IrBuilder<'a> {
         self.cur_function_mut().set_pred(block, pred)
     }
 
-    fn intern_string(&mut self, s: &str) -> Rc<str> {
-        self.strings.intern(s)
+    fn intern_string(&mut self, s: &str) -> (Rc<str>, GlobalId) {
+        match self.strings.get_key_value(s) {
+            Some((s, id)) => (s.clone(), *id),
+            None => {
+                let len = self.globals.len();
+                assert!(len < u32::MAX as usize);
+                let id = GlobalId(len as u32);
+                let s: Rc<str> = s.into();
+                self.strings.insert(s.clone(), id);
+                let string_id = format!("str{}", id.0);
+                let global = Global {
+                    name:  string_id.into(),
+                    value: Some(GlobalValue::String(s.clone())),
+                };
+                self.globals.push(global);
+                (s, id)
+            }
+        }
     }
 
     fn new_vtable(
-        strings: &mut StringSet,
-        globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
-        globals: &mut IndexVec<GlobalId, Global<'a>>,
+        &mut self,
         ty: TypeId,
         class_name: &'a str,
-        vtable: Box<[GlobalId]>,
+        vtable: Box<[Option<GlobalId>]>,
     ) -> GlobalId {
         use std::collections::hash_map::Entry;
 
-        match globals_map.entry((ty, "Table")) {
+        let name = format!("{}.Table", class_name);
+        let (name, _) = self.intern_string(&name);
+
+        match self.globals_map.entry((ty, "Table")) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
-                let len = globals.len();
+                let len = self.globals.len();
                 assert!(len < u32::MAX as usize);
                 let id = GlobalId(len as u32);
                 entry.insert(id);
-                let name = format!("{}.Table", class_name);
                 let global = Global {
-                    name:  strings.intern(&name),
+                    name,
                     value: Some(GlobalValue::Vtable(Instr::Vtable(id, vtable))),
                 };
-                globals.push(global);
+                self.globals.push(global);
                 id
             }
         }
     }
 
-    fn new_function(
-        strings: &mut StringSet,
-        globals_map: &mut FxHashMap<(TypeId, &'a str), GlobalId>,
-        globals: &mut IndexVec<GlobalId, Global<'a>>,
-        ty: TypeId,
-        class_name: &'a str,
-        name: &'a str,
-    ) -> GlobalId {
+    fn new_function(&mut self, ty: TypeId, class_name: &'a str, fn_name: &'a str) -> GlobalId {
         use std::collections::hash_map::Entry;
 
-        match globals_map.entry((ty, name)) {
+        let name = format!("{}.{}", class_name, fn_name);
+        let (name, _) = self.intern_string(&name);
+
+        match self.globals_map.entry((ty, fn_name)) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
-                let len = globals.len();
+                let len = self.globals.len();
                 assert!(len < u32::MAX as usize);
                 let id = GlobalId(len as u32);
                 entry.insert(id);
-                let name = format!("{}.{}", class_name, name);
-                let global = Global {
-                    name:  strings.intern(&name),
-                    value: None,
-                };
-                globals.push(global);
+                let global = Global { name, value: None };
+                self.globals.push(global);
                 id
             }
         }
+    }
+
+    fn build_string(&mut self, id: GlobalId) -> IrId {
+        let tmp = self.new_tmp();
+        let kind = Instr::AssignLoad {
+            dst: tmp,
+            ty:  Type::String,
+            src: IrId::Global(id),
+        };
+        self.push_instr(kind);
+        tmp
     }
 
     fn build_default(&mut self, dst: IrId, ty: TypeId) {
@@ -593,11 +592,12 @@ impl<'a> IrBuilder<'a> {
                 self.push_instr(kind);
             }
             TypeId::STRING => {
-                let s = self.intern_string("");
+                let (_, s) = self.intern_string("");
+                let s = self.build_string(s);
                 let kind = Instr::Store {
                     dst,
                     ty: Type::String,
-                    src: Value::Str(s),
+                    src: Value::Id(s),
                 };
                 self.push_instr(kind);
             }
@@ -624,7 +624,6 @@ impl<'a> IrBuilder<'a> {
         let mut class_attrs = self
             .env
             .get_class(type_id)
-            .unwrap()
             .attrs()
             .iter()
             .map(|(k, ty)| (*k, *ty, 0))
@@ -642,7 +641,7 @@ impl<'a> IrBuilder<'a> {
 
         self.build_new(type_id, attrs, &class_attrs);
 
-        for method in methods {
+        for method in methods.into_vec() {
             self.build_function(method, &class_attrs);
         }
     }
@@ -653,7 +652,7 @@ impl<'a> IrBuilder<'a> {
         typed_attrs: Box<[TypedAttribute<'a>]>,
         class_attrs: &[(&'a str, AttrData, usize)],
     ) -> FxHashMap<&'a str, IrId> {
-        let parent = self.env.get_class(ty).unwrap().parent().unwrap();
+        let parent = self.env.get_class(ty).parent().unwrap();
         let parent_new = self
             .globals_map
             .get(&(parent, "new"))
@@ -667,13 +666,12 @@ impl<'a> IrBuilder<'a> {
         function.begin_scope();
         let ret = ty.into();
         let kind = Instr::Function {
-            id: IrId::Global(function_id),
+            id: function_id,
             ret,
             params: function_params,
         };
         function.push_instr(kind);
         function.set_params(std::iter::empty());
-        function.set_attrs(class_attrs);
         self.globals[function_id].value = Some(GlobalValue::Function(function));
 
         let tmp1 = self.new_tmp();
@@ -684,8 +682,9 @@ impl<'a> IrBuilder<'a> {
             Box::new([(Type::Ptr, Value::Id(IrId::Tmp(0)))]),
         );
         self.push_instr(kind);
+        self.cur_function_mut().set_attrs(class_attrs, Some(tmp1));
 
-        for TypedAttribute { id, init, ty, .. } in typed_attrs {
+        for TypedAttribute { id, init, ty, .. } in typed_attrs.into_vec() {
             let id = self.get_local(id);
 
             match init {
@@ -738,13 +737,13 @@ impl<'a> IrBuilder<'a> {
 
         function.begin_scope();
         let kind = Instr::Function {
-            id:     IrId::Global(function_id),
+            id:     function_id,
             ret:    typed_method.return_ty().into(),
             params: function_params.into_boxed_slice(),
         };
         function.push_instr(kind);
         function.set_params(params.iter().map(|f| (f.id, f.ty)));
-        function.set_attrs(class_attrs);
+        function.set_attrs(class_attrs, None);
         self.globals[function_id].value = Some(GlobalValue::Function(function));
 
         let ret_ty = typed_method.return_ty();
@@ -807,10 +806,8 @@ impl<'a> IrBuilder<'a> {
                 (tmp, ty)
             }
             TEK::StringLit(s) => {
-                let tmp = self.new_tmp();
-                let s = self.intern_string(&s);
-                let kind = Instr::Assign(tmp, Value::Str(s));
-                self.push_instr(kind);
+                let (_, s) = self.intern_string(&s);
+                let tmp = self.build_string(s);
                 (tmp, ty)
             }
             TEK::Id(id) => {
@@ -820,15 +817,19 @@ impl<'a> IrBuilder<'a> {
                     dst,
                     ty: ty.into(),
                     src,
-                    offset: 0,
                 };
                 self.push_instr(kind);
                 (dst, ty)
             }
             TEK::Unary(op, expr) => {
-                let (src, _) = self.build_expr(*expr);
+                let (src, src_ty) = self.build_expr(*expr);
                 let dst = self.new_tmp();
-                let kind = Instr::AssignUn { dst, op, src };
+                let kind = Instr::AssignUn {
+                    dst,
+                    op,
+                    src,
+                    ty: src_ty.into(),
+                };
                 self.push_instr(kind);
                 (dst, ty)
             }
@@ -888,10 +889,9 @@ impl<'a> IrBuilder<'a> {
             TEK::SelfId => {
                 let tmp = self.new_tmp();
                 let kind = Instr::AssignLoad {
-                    dst:    tmp,
-                    ty:     self.cur_class.into(),
-                    src:    IrId::LOCAL_SELF,
-                    offset: 0,
+                    dst: tmp,
+                    ty:  self.cur_class.into(),
+                    src: IrId::LOCAL_SELF,
                 };
                 self.push_instr(kind);
                 (tmp, ty)
@@ -903,7 +903,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::Let(formals, body) => {
                 self.begin_scope();
-                for (formal, expr) in formals {
+                for (formal, expr) in formals.into_vec() {
                     let TypedFormal { id, ty, .. } = formal;
                     match expr {
                         Some(expr) => {
@@ -1008,7 +1008,7 @@ impl<'a> IrBuilder<'a> {
 
         let end_block = self.begin_block();
         let tmp = self.new_tmp();
-        let kind = Instr::Phi(
+        let kind = Instr::AssignPhi(
             tmp,
             vec![(Value::Id(then), then_block), (Value::Id(els), else_block)],
         );
@@ -1036,39 +1036,49 @@ impl<'a> IrBuilder<'a> {
 
         let tmp1 = self.new_tmp();
         let kind = Instr::AssignLoad {
-            dst:    tmp1,
-            ty:     self.cur_class.into(),
-            src:    IrId::LOCAL_SELF,
-            offset: 0,
+            dst: tmp1,
+            ty:  self.cur_class.into(),
+            src: IrId::LOCAL_SELF,
         };
         self.push_instr(kind);
         args[0] = (self.cur_class.into(), Value::Id(tmp1));
 
         let ptr = self.new_ptr("VTable", TypeId::INT);
-        let kind = Instr::AssignExtract(ptr, tmp1, 1);
+        let kind = Instr::AssignExtract {
+            dst:    ptr,
+            src_ty: Type::Object,
+            src:    tmp1,
+            ty:     Type::Ptr,
+            offset: 1,
+        };
         self.push_instr(kind);
 
         let offset = self
             .env
             .get_class(self.cur_class)
-            .unwrap()
             .get_vtable_offset(method_name)
             .unwrap();
 
         let tmp3 = self.new_tmp();
-        let kind = Instr::AssignLoad {
+        let kind = Instr::AssignGep {
             dst: tmp3,
-            ty: Type::Ptr,
             src: ptr,
             offset,
         };
         self.push_instr(kind);
-
         let tmp4 = self.new_tmp();
-        let kind = Instr::AssignCall(tmp4, ty.into(), tmp3, args.into_boxed_slice());
+        let kind = Instr::AssignLoad {
+            dst: tmp4,
+            ty:  Type::Ptr,
+            src: tmp3,
+        };
         self.push_instr(kind);
 
-        (tmp4, ty)
+        let tmp5 = self.new_tmp();
+        let kind = Instr::AssignCall(tmp5, ty.into(), tmp4, args.into_boxed_slice());
+        self.push_instr(kind);
+
+        (tmp5, ty)
     }
 
     /// first argument is 'empty'
@@ -1111,30 +1121,42 @@ impl<'a> IrBuilder<'a> {
         args[0] = (expr_ty.into(), Value::Id(expr));
 
         let ptr = self.new_ptr("VTable", TypeId::INT);
-        let kind = Instr::AssignExtract(ptr, expr, 1);
+        let kind = Instr::AssignExtract {
+            dst:    ptr,
+            src_ty: Type::Object,
+            src:    expr,
+            ty:     Type::Ptr,
+            offset: 1,
+        };
         self.push_instr(kind);
 
         let offset = self
             .env
             .get_class(ty)
-            .unwrap()
             .get_vtable_offset(method_name)
             .unwrap();
 
         let tmp2 = self.new_tmp();
-        let kind = Instr::AssignLoad {
+        let kind = Instr::AssignGep {
             dst: tmp2,
-            ty: Type::Ptr,
             src: ptr,
             offset,
         };
         self.push_instr(kind);
 
         let tmp3 = self.new_tmp();
-        let kind = Instr::AssignCall(tmp3, ty.into(), tmp2, args.into_boxed_slice());
+        let kind = Instr::AssignLoad {
+            dst: tmp3,
+            ty:  Type::Ptr,
+            src: tmp2,
+        };
         self.push_instr(kind);
 
-        (tmp3, ty)
+        let tmp4 = self.new_tmp();
+        let kind = Instr::AssignCall(tmp4, ty.into(), tmp3, args.into_boxed_slice());
+        self.push_instr(kind);
+
+        (tmp4, ty)
     }
 
     fn build_static_dispatch(
