@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::{
     ast::{
         TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
-        TypedMethod,
+        TypedMethod, UnOp,
     },
     fxhash::FxHashMap,
     index_vec::{index_vec, Idx, IndexVec},
@@ -494,6 +494,10 @@ impl<'a> IrBuilder<'a> {
         self.cur_function_mut().set_pred(block, pred)
     }
 
+    fn get_global_id(&mut self, ty: TypeId, name: &'a str) -> Option<GlobalId> {
+        self.globals_map.get(&(ty, name)).copied()
+    }
+
     fn intern_string(&mut self, s: &str) -> (Rc<str>, GlobalId) {
         match self.strings.get_key_value(s) {
             Some((s, id)) => (s.clone(), *id),
@@ -653,13 +657,9 @@ impl<'a> IrBuilder<'a> {
         class_attrs: &[(&'a str, AttrData, usize)],
     ) -> FxHashMap<&'a str, IrId> {
         let parent = self.env.get_class(ty).parent().unwrap();
-        let parent_new = self
-            .globals_map
-            .get(&(parent, "new"))
-            .map(|&id| IrId::Global(id))
-            .unwrap();
+        let parent_new = self.get_global_id(parent, "new").map(IrId::Global).unwrap();
         let mut function = FunctionBuilder::new(self.cur_class);
-        let function_id = *self.globals_map.get(&(self.cur_class, "new")).unwrap();
+        let function_id = self.get_global_id(self.cur_class, "new").unwrap();
         self.cur_function = function_id;
         let function_params = Box::new([(Type::Ptr, function.new_tmp())]);
 
@@ -690,11 +690,11 @@ impl<'a> IrBuilder<'a> {
             match init {
                 Some(init) => {
                     let (init, init_ty) = self.build_expr(init);
-                    let init = self.build_maybe_cast(ty, init, init_ty);
+                    let src = self.build_maybe_cast(ty, init, init_ty);
                     let kind = Instr::Store {
                         dst: id,
-                        ty:  ty.into(),
-                        src: Value::Id(init),
+                        ty: ty.into(),
+                        src,
                     };
                     self.push_instr(kind);
                 }
@@ -702,8 +702,8 @@ impl<'a> IrBuilder<'a> {
             }
         }
 
-        let vtable = self.globals_map.get(&(ty, "Table")).unwrap();
-        let vtable = Value::Id(IrId::Global(*vtable));
+        let vtable = self.get_global_id(ty, "Table").unwrap();
+        let vtable = Value::Id(IrId::Global(vtable));
         let tmp2 = self.new_tmp();
         let kind = Instr::AssignInsert {
             dst: tmp2,
@@ -730,7 +730,7 @@ impl<'a> IrBuilder<'a> {
         let params = typed_method.params();
 
         let mut function = FunctionBuilder::new(self.cur_class);
-        let function_id = *self.globals_map.get(&(self.cur_class, id)).unwrap();
+        let function_id = self.get_global_id(self.cur_class, id).unwrap();
         self.cur_function = function_id;
         let mut function_params = vec![(self.cur_class.into(), function.new_tmp())];
         function_params.extend(params.iter().map(|f| (f.ty.into(), function.new_tmp())));
@@ -749,7 +749,7 @@ impl<'a> IrBuilder<'a> {
         let ret_ty = typed_method.return_ty();
         let (body, ty) = self.build_expr(typed_method.take_body());
         let body = self.build_maybe_cast(ret_ty, body, ty);
-        let kind = Instr::Return(Value::Id(body));
+        let kind = Instr::Return(body);
         self.push_instr(kind);
 
         let ret = self.end_function();
@@ -767,48 +767,61 @@ impl<'a> IrBuilder<'a> {
         ret
     }
 
-    fn build_maybe_cast(&mut self, ty: TypeId, expr: IrId, expr_ty: TypeId) -> IrId {
+    fn build_cast(&mut self, expr: Value, expr_ty: TypeId) -> IrId {
         match expr_ty {
-            TypeId::INT | TypeId::BOOL | TypeId::STRING if ty != expr_ty => {
+            TypeId::INT | TypeId::BOOL | TypeId::STRING => {
                 let tmp = self.new_tmp();
                 let function_id = self
-                    .globals_map
-                    .get(&(expr_ty, "Cast"))
-                    .map(|&id| IrId::Global(id))
+                    .get_global_id(expr_ty, "Cast")
+                    .map(IrId::Global)
                     .unwrap();
                 let kind = Instr::AssignCall(
                     tmp,
                     Type::Object,
                     function_id,
-                    Box::new([(expr_ty.into(), Value::Id(expr))]),
+                    Box::new([(expr_ty.into(), expr)]),
                 );
                 self.push_instr(kind);
                 tmp
+            }
+            _ => match expr {
+                Value::Id(id) => id,
+                _ => unreachable!(),
+            },
+        }
+    }
+
+    fn build_maybe_cast(&mut self, ty: TypeId, expr: Value, expr_ty: TypeId) -> Value {
+        match expr_ty {
+            TypeId::INT | TypeId::BOOL | TypeId::STRING if ty != expr_ty => {
+                let tmp = self.new_tmp();
+                let function_id = self
+                    .get_global_id(expr_ty, "Cast")
+                    .map(IrId::Global)
+                    .unwrap();
+                let kind = Instr::AssignCall(
+                    tmp,
+                    Type::Object,
+                    function_id,
+                    Box::new([(expr_ty.into(), expr)]),
+                );
+                self.push_instr(kind);
+                Value::Id(tmp)
             }
             _ => expr,
         }
     }
 
-    fn build_expr(&mut self, expr: TypedExpr<'a>) -> (IrId, TypeId) {
+    fn build_expr(&mut self, expr: TypedExpr<'a>) -> (Value, TypeId) {
         let TypedExpr { kind, ty, .. } = expr;
         use TypedExprKind as TEK;
         match kind {
-            TEK::IntLit(i) => {
-                let tmp = self.new_tmp();
-                let kind = Instr::Assign(tmp, Value::Int(i));
-                self.push_instr(kind);
-                (tmp, ty)
-            }
-            TEK::BoolLit(b) => {
-                let tmp = self.new_tmp();
-                let kind = Instr::Assign(tmp, Value::Bool(b));
-                self.push_instr(kind);
-                (tmp, ty)
-            }
+            TEK::IntLit(i) => (Value::Int(i), ty),
+            TEK::BoolLit(b) => (Value::Bool(b), ty),
             TEK::StringLit(s) => {
                 let (_, s) = self.intern_string(&s);
                 let tmp = self.build_string(s);
-                (tmp, ty)
+                (Value::Id(tmp), ty)
             }
             TEK::Id(id) => {
                 let dst = self.new_tmp();
@@ -819,38 +832,59 @@ impl<'a> IrBuilder<'a> {
                     src,
                 };
                 self.push_instr(kind);
-                (dst, ty)
+                (Value::Id(dst), ty)
             }
             TEK::Unary(op, expr) => {
                 let (src, src_ty) = self.build_expr(*expr);
-                let dst = self.new_tmp();
-                let kind = Instr::AssignUn {
-                    dst,
-                    op,
-                    src,
-                    ty: src_ty.into(),
-                };
-                self.push_instr(kind);
-                (dst, ty)
+                let src_ty = src_ty.into();
+                match (op, src) {
+                    (UnOp::IsVoid, Value::Id(src)) if src_ty == Type::Object => {
+                        let tmp = self.new_tmp();
+                        let kind = Instr::AssignExtract {
+                            dst: tmp,
+                            src_ty,
+                            src,
+                            ty: Type::Ptr,
+                            offset: 0,
+                        };
+                        self.push_instr(kind);
+                        let dst = self.new_tmp();
+                        let kind = Instr::AssignUn {
+                            dst,
+                            op,
+                            ty: Type::Ptr,
+                            src: Value::Id(tmp),
+                        };
+                        self.push_instr(kind);
+                        (Value::Id(dst), ty)
+                    }
+                    (UnOp::IsVoid, Value::Void) => (Value::Bool(true), ty),
+                    (UnOp::IsVoid, _) => (Value::Bool(false), ty),
+                    _ => {
+                        let dst = self.new_tmp();
+                        let kind = Instr::AssignUn {
+                            dst,
+                            op,
+                            src,
+                            ty: src_ty,
+                        };
+                        self.push_instr(kind);
+                        (Value::Id(dst), ty)
+                    }
+                }
             }
             TEK::Binary(op, lhs, rhs) => {
                 let (lhs, _) = self.build_expr(*lhs);
                 let (rhs, _) = self.build_expr(*rhs);
                 let dst = self.new_tmp();
-                let kind = Instr::AssignBin {
-                    dst,
-                    op,
-                    lhs: Value::Id(lhs),
-                    rhs: Value::Id(rhs),
-                };
+                let kind = Instr::AssignBin { dst, op, lhs, rhs };
                 self.push_instr(kind);
-                (dst, ty)
+                (Value::Id(dst), ty)
             }
             TEK::New(ty) => {
                 let allocator = self
-                    .globals_map
-                    .get(&(TypeId::ALLOCATOR, "alloc"))
-                    .map(|&id| IrId::Global(id))
+                    .get_global_id(TypeId::ALLOCATOR, "alloc")
+                    .map(IrId::Global)
                     .unwrap();
                 let tmp1 = self.new_tmp();
                 let size = self.class_sizes[ty] as i64;
@@ -864,27 +898,23 @@ impl<'a> IrBuilder<'a> {
 
                 let tmp1 = Value::Id(tmp1);
                 let tmp2 = self.new_tmp();
-                let function_id = self
-                    .globals_map
-                    .get(&(ty, "new"))
-                    .map(|&id| IrId::Global(id))
-                    .unwrap();
+                let function_id = self.get_global_id(ty, "new").map(IrId::Global).unwrap();
                 let kind =
                     Instr::AssignCall(tmp2, ty.into(), function_id, Box::new([(Type::Ptr, tmp1)]));
                 self.push_instr(kind);
-                (tmp2, ty)
+                (Value::Id(tmp2), ty)
             }
             TEK::Assign(id, expr) => {
                 let (expr, expr_ty) = self.build_expr(*expr);
-                let new_expr = self.build_maybe_cast(ty, expr, expr_ty);
+                let src = self.build_maybe_cast(ty, expr, expr_ty);
                 let id = self.get_local(id);
                 let kind = Instr::Store {
                     dst: id,
-                    ty:  ty.into(),
-                    src: Value::Id(new_expr),
+                    ty: ty.into(),
+                    src,
                 };
                 self.push_instr(kind);
-                (new_expr, ty)
+                (src, ty)
             }
             TEK::SelfId => {
                 let tmp = self.new_tmp();
@@ -894,7 +924,7 @@ impl<'a> IrBuilder<'a> {
                     src: IrId::LOCAL_SELF,
                 };
                 self.push_instr(kind);
-                (tmp, ty)
+                (Value::Id(tmp), ty)
             }
             TEK::SelfDispatch(id, args) => self.build_self_dispatch(id, args, ty),
             TEK::Dispatch(expr, id, args) => self.build_dispatch(*expr, id, args, ty),
@@ -909,11 +939,11 @@ impl<'a> IrBuilder<'a> {
                         Some(expr) => {
                             let (expr, expr_ty) = self.build_expr(expr);
                             let id = self.push_local(id, ty);
-                            let expr = self.build_maybe_cast(ty, expr, expr_ty);
+                            let src = self.build_maybe_cast(ty, expr, expr_ty);
                             let kind = Instr::Store {
                                 dst: id,
-                                ty:  ty.into(),
-                                src: Value::Id(expr),
+                                ty: ty.into(),
+                                src,
                             };
                             self.push_instr(kind);
                         }
@@ -929,7 +959,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::Block(exprs) => {
                 let exprs = exprs.into_vec().into_iter();
-                exprs.fold((IrId::Tmp(0), TypeId::SelfType), |_, expr| {
+                exprs.fold((Value::Void, TypeId::SelfType), |_, expr| {
                     self.build_expr(expr)
                 })
             }
@@ -943,13 +973,27 @@ impl<'a> IrBuilder<'a> {
         &mut self,
         expr: TypedExpr<'a>,
         cases: Box<[TypedCaseArm<'a>]>,
-    ) -> (IrId, TypeId) {
-        let _ = expr;
-        let _ = cases;
+    ) -> (Value, TypeId) {
+        let (expr, expr_ty) = self.build_expr(expr);
+        let src = self.build_cast(expr, expr_ty);
+        let dst = self.new_tmp();
+        let instr = Instr::AssignExtract {
+            dst,
+            src_ty: Type::Object,
+            src,
+            ty: Type::Ptr,
+            offset: 1,
+        };
+        self.push_instr(instr);
+        self.begin_scope();
+        let max = self.push_local("Max", TypeId::INT);
+        for case in cases {
+            let table = self.get_global_id(case.ty, "Table").unwrap();
+        }
         todo!()
     }
 
-    fn build_while(&mut self, cond: TypedExpr<'a>, body: TypedExpr<'a>) -> (IrId, TypeId) {
+    fn build_while(&mut self, cond: TypedExpr<'a>, body: TypedExpr<'a>) -> (Value, TypeId) {
         let cur_block = self.cur_block();
         let cond_block = self.begin_block();
         self.set_dom(cur_block, cond_block);
@@ -971,11 +1015,8 @@ impl<'a> IrBuilder<'a> {
         self.set_pred(cond_block, self.cur_block());
 
         let end_block = self.begin_block();
-        let tmp = self.new_tmp();
-        let kind = Instr::Assign(tmp, Value::Void);
-        self.push_instr(kind);
         self.patch_jmp_cond(cond_end_block, body_block, end_block);
-        (tmp, TypeId::OBJECT)
+        (Value::Void, TypeId::OBJECT)
     }
 
     fn build_if(
@@ -984,7 +1025,7 @@ impl<'a> IrBuilder<'a> {
         then: TypedExpr<'a>,
         els: TypedExpr<'a>,
         ty: TypeId,
-    ) -> (IrId, TypeId) {
+    ) -> (Value, TypeId) {
         let (cond, _) = self.build_expr(cond);
 
         let cond_block = self.cur_block();
@@ -1008,16 +1049,13 @@ impl<'a> IrBuilder<'a> {
 
         let end_block = self.begin_block();
         let tmp = self.new_tmp();
-        let kind = Instr::AssignPhi(
-            tmp,
-            vec![(Value::Id(then), then_block), (Value::Id(els), else_block)],
-        );
+        let kind = Instr::AssignPhi(tmp, ty.into(), vec![(then, then_block), (els, else_block)]);
         self.push_instr(kind);
         self.patch_jmp_cond(cond_block, then_block, else_block);
         self.patch_jmp(then_end_block, end_block);
         self.set_dom(cond_block, end_block);
 
-        (tmp, ty)
+        (Value::Id(tmp), ty)
     }
 
     fn build_self_dispatch(
@@ -1025,7 +1063,7 @@ impl<'a> IrBuilder<'a> {
         method_name: &'a str,
         args: Box<[TypedExpr<'a>]>,
         ty: TypeId,
-    ) -> (IrId, TypeId) {
+    ) -> (Value, TypeId) {
         let function_params = self
             .env
             .get_method(self.cur_class, method_name)
@@ -1078,7 +1116,7 @@ impl<'a> IrBuilder<'a> {
         let kind = Instr::AssignCall(tmp5, ty.into(), tmp4, args.into_boxed_slice());
         self.push_instr(kind);
 
-        (tmp5, ty)
+        (Value::Id(tmp5), ty)
     }
 
     /// first argument is 'empty'
@@ -1091,7 +1129,7 @@ impl<'a> IrBuilder<'a> {
         for (arg, param) in args.into_vec().into_iter().zip(params) {
             let (arg, arg_ty) = self.build_expr(arg);
             let arg = self.build_maybe_cast(param, arg, arg_ty);
-            arg_ids.push((param.into(), Value::Id(arg)));
+            arg_ids.push((param.into(), arg));
         }
         arg_ids
     }
@@ -1102,7 +1140,7 @@ impl<'a> IrBuilder<'a> {
         method_name: &'a str,
         args: Box<[TypedExpr<'a>]>,
         ty: TypeId,
-    ) -> (IrId, TypeId) {
+    ) -> (Value, TypeId) {
         let expr_ty = expr.ty;
 
         let function_params = self
@@ -1118,14 +1156,28 @@ impl<'a> IrBuilder<'a> {
         if expr_ty.needs_cast() {
             todo!()
         }
-        args[0] = (expr_ty.into(), Value::Id(expr));
+        args[0] = (expr_ty.into(), expr);
 
         let ptr = self.new_ptr("VTable", TypeId::INT);
+        let src = match expr {
+            Value::Id(src) => src,
+            Value::Void => {
+                let tmp = self.new_tmp();
+                let kind = Instr::Assign {
+                    dst: tmp,
+                    ty:  Type::Object,
+                    src: Value::Void,
+                };
+                self.push_instr(kind);
+                tmp
+            }
+            _ => unreachable!(),
+        };
         let kind = Instr::AssignExtract {
-            dst:    ptr,
+            dst: ptr,
             src_ty: Type::Object,
-            src:    expr,
-            ty:     Type::Ptr,
+            src,
+            ty: Type::Ptr,
             offset: 1,
         };
         self.push_instr(kind);
@@ -1156,7 +1208,7 @@ impl<'a> IrBuilder<'a> {
         let kind = Instr::AssignCall(tmp4, ty.into(), tmp3, args.into_boxed_slice());
         self.push_instr(kind);
 
-        (tmp4, ty)
+        (Value::Id(tmp4), ty)
     }
 
     fn build_static_dispatch(
@@ -1166,7 +1218,7 @@ impl<'a> IrBuilder<'a> {
         method_name: &'a str,
         args: Box<[TypedExpr<'a>]>,
         result_ty: TypeId,
-    ) -> (IrId, TypeId) {
+    ) -> (Value, TypeId) {
         let function_params = self
             .env
             .get_method(ty, method_name)
@@ -1180,17 +1232,16 @@ impl<'a> IrBuilder<'a> {
         if expr_ty.needs_cast() {
             todo!()
         }
-        args[0] = (ty.into(), Value::Id(expr));
+        args[0] = (ty.into(), expr);
 
         let tmp = self.new_tmp();
         let funciton_id = self
-            .globals_map
-            .get(&(ty, method_name))
-            .map(|&id| IrId::Global(id))
+            .get_global_id(ty, method_name)
+            .map(IrId::Global)
             .unwrap();
         let kind = Instr::AssignCall(tmp, result_ty.into(), funciton_id, args.into_boxed_slice());
         self.push_instr(kind);
 
-        (tmp, result_ty)
+        (Value::Id(tmp), result_ty)
     }
 }

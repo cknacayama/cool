@@ -74,12 +74,16 @@ pub enum Instr {
 
     Jmp(BlockId),
     JmpCond {
-        src:      IrId,
+        src:      Value,
         on_true:  BlockId,
         on_false: BlockId,
     },
 
-    Assign(IrId, Value),
+    Assign {
+        dst: IrId,
+        ty:  Type,
+        src: Value,
+    },
     AssignBin {
         dst: IrId,
         op:  BinOp,
@@ -90,7 +94,7 @@ pub enum Instr {
         dst: IrId,
         op:  UnOp,
         ty:  Type,
-        src: IrId,
+        src: Value,
     },
     AssignCall(IrId, Type, IrId, Box<[(Type, Value)]>),
     AssignExtract {
@@ -112,7 +116,7 @@ pub enum Instr {
         src:    IrId,
         offset: usize,
     },
-    AssignPhi(IrId, Vec<(Value, BlockId)>),
+    AssignPhi(IrId, Type, Vec<(Value, BlockId)>),
 
     // before mem2reg
     Local(Type, IrId),
@@ -143,7 +147,7 @@ impl Instr {
     }
 
     pub fn is_phi(&self) -> bool {
-        matches!(self, Self::AssignPhi(_, _))
+        matches!(self, Self::AssignPhi(_, _, _))
     }
 
     pub fn uses(&self) -> (Option<IrId>, Option<Box<[IrId]>>) {
@@ -169,7 +173,13 @@ impl Instr {
                 ),
             ),
 
-            Self::JmpCond { src, .. } => (None, Some([*src].into())),
+            Self::JmpCond {
+                src: Value::Id(src),
+                ..
+            } => (None, Some([*src].into())),
+
+            Self::JmpCond { .. } => (None, None),
+
             Self::Return(val) => {
                 if let Value::Id(id) = val {
                     (None, Some([*id].into()))
@@ -199,7 +209,12 @@ impl Instr {
                 ..
             } => (Some(*dst), Some([*src1, *src2].into())),
 
-            Self::AssignBin {
+            Self::Assign {
+                dst,
+                src: Value::Id(src),
+                ..
+            }
+            | Self::AssignBin {
                 dst,
                 lhs: Value::Id(src),
                 ..
@@ -210,13 +225,18 @@ impl Instr {
                 ..
             }
             | Self::AssignInsert { dst, src, .. }
-            | Self::AssignUn { dst, src, .. }
-            | Self::Assign(dst, Value::Id(src))
+            | Self::AssignUn {
+                dst,
+                src: Value::Id(src),
+                ..
+            }
             | Self::AssignLoad { dst, src, .. }
             | Self::AssignExtract { dst, src, .. }
             | Self::AssignGep { dst, src, .. } => (Some(*dst), Some([*src].into())),
 
-            Self::Assign(dst, _) | Self::AssignBin { dst, .. } => (Some(*dst), None),
+            Self::Assign { dst, .. } | Self::AssignBin { dst, .. } | Self::AssignUn { dst, .. } => {
+                (Some(*dst), None)
+            }
 
             Self::AssignCall(dst, _, id2, args) => {
                 let used_ids = args
@@ -232,7 +252,7 @@ impl Instr {
                 (Some(*dst), Some(used_ids.into_boxed_slice()))
             }
 
-            Self::AssignPhi(dst, vals) => (
+            Self::AssignPhi(dst, _, vals) => (
                 Some(*dst),
                 Some(
                     vals.iter()
@@ -287,7 +307,9 @@ impl fmt::Display for Instr {
             } => {
                 write!(f, "    {} ? block{} : block{}", src, on_true, on_false)
             }
-            Instr::Assign(id, val) => write!(f, "    {} = {}", id, val),
+            Instr::Assign { dst, ty, src } => {
+                write!(f, "    {} = {} {}", dst, ty, src)
+            }
             Instr::AssignBin { op, dst, lhs, rhs } => {
                 write!(f, "    {} = {} {}, {}", dst, op.to_ir_string(), lhs, rhs)
             }
@@ -329,8 +351,8 @@ impl fmt::Display for Instr {
             Instr::AssignGep { dst, src, offset } => {
                 write!(f, "    {} = gep {}, {}", dst, src, offset)
             }
-            Instr::AssignPhi(id, vals) => {
-                write!(f, "    {} = phi ", id)?;
+            Instr::AssignPhi(id, ty, vals) => {
+                write!(f, "    {} = phi {}", id, ty)?;
                 for (i, (val, block)) in vals.iter().enumerate() {
                     write!(f, "[{}, block{}]", val, block)?;
                     if i != vals.len() - 1 {
@@ -564,7 +586,14 @@ impl Instr {
                     on_false
                 )
             }
-            Instr::Assign(id, val) => format!("    {} = {}", id, val.to_ir_string(globals)),
+            Instr::Assign { dst, ty, src } => {
+                format!(
+                    "    {} = {} {}",
+                    dst.to_ir_string(globals),
+                    ty,
+                    src.to_ir_string(globals)
+                )
+            }
             Instr::AssignBin { op, dst, lhs, rhs } => {
                 format!(
                     "    {} = {} {}, {}",
@@ -634,8 +663,8 @@ impl Instr {
                     offset
                 )
             }
-            Instr::AssignPhi(id, vals) => {
-                let mut s = format!("    {} = phi ", id);
+            Instr::AssignPhi(id, ty, vals) => {
+                let mut s = format!("    {} = phi {}", id, ty);
                 for (i, (val, block)) in vals.iter().enumerate() {
                     s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
                     if i != vals.len() - 1 {

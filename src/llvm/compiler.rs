@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::{
+    ast::{BinOp, UnOp},
     fxhash::FxHashMap,
     index_vec::IndexVec,
     ir::{opt::Function, types::Type, GlobalId, Instr, IrId, Value},
@@ -159,8 +160,33 @@ impl Compiler {
         }
     }
 
+    fn compile_value_only(&mut self, val: &Value) {
+        match val {
+            Value::Int(i) => {
+                self.push_str(&format!("{}", i));
+            }
+            Value::Bool(b) => {
+                self.push_str(&format!("{}", b));
+            }
+            Value::Id(id) => {
+                self.push_str(&format!("{}", id.to_ir_string(&self.globals)));
+            }
+            Value::Void => {
+                self.push_str("{ ptr null, ptr null }");
+            }
+        }
+    }
+
     fn get_id(&self, id: IrId) -> String {
         id.to_ir_string(&self.globals)
+    }
+
+    fn insert_id(&mut self, id: IrId, ty: Type) -> Option<Type> {
+        self.ids.insert(id, ty)
+    }
+
+    fn push_newline(&mut self) {
+        self.output.push('\n')
     }
 
     pub fn compile_instr(&mut self, instr: &Instr) {
@@ -187,7 +213,7 @@ impl Compiler {
             Instr::Function { id, ret, params } => {
                 self.push_str(&format!("define ccc {} @{}(", ret, self.globals[*id]));
                 for (i, (ty, param)) in params.iter().enumerate() {
-                    self.ids.insert(*param, *ty);
+                    self.insert_id(*param, *ty);
                     self.push_str(&format!("{} {}", ty, self.get_id(*param)));
                     if i + 1 < params.len() {
                         self.push_str(", ");
@@ -199,7 +225,7 @@ impl Compiler {
                 self.push_str(&format!("{}:\n", id));
             }
             Instr::AssignGep { dst, src, offset } => {
-                self.ids.insert(*dst, Type::Ptr);
+                self.insert_id(*dst, Type::Ptr);
                 self.push_str(&format!(
                     "    {} = getelementptr ptr, ptr {}, i64 {}\n",
                     self.get_id(*dst),
@@ -208,7 +234,7 @@ impl Compiler {
                 ));
             }
             Instr::AssignLoad { dst, ty, src } => {
-                self.ids.insert(*dst, *ty);
+                self.insert_id(*dst, *ty);
                 self.push_str(&format!(
                     "    {} = load {}, ptr {}\n",
                     self.get_id(*dst),
@@ -217,13 +243,13 @@ impl Compiler {
                 ));
             }
             Instr::Store { dst, src, ty } => {
-                self.ids.insert(*dst, Type::Ptr);
+                self.insert_id(*dst, Type::Ptr);
                 self.push_str("    store ");
                 self.compile_value_with_type(*ty, src);
                 self.push_str(&format!(", ptr {}\n", self.get_id(*dst)));
             }
             Instr::AssignCall(dst, ret, src, args) => {
-                self.ids.insert(*dst, *ret);
+                self.insert_id(*dst, *ret);
                 self.push_str(&format!(
                     "    {} = call {} {}(",
                     self.get_id(*dst),
@@ -245,7 +271,7 @@ impl Compiler {
                 val,
                 idx,
             } => {
-                self.ids.insert(*dst, *ty);
+                self.insert_id(*dst, *ty);
                 self.push_str(&format!(
                     "    {} = insertvalue {} {}, ",
                     self.get_id(*dst),
@@ -262,7 +288,7 @@ impl Compiler {
                 ty,
                 offset,
             } => {
-                self.ids.insert(*dst, *ty);
+                self.insert_id(*dst, *ty);
                 self.push_str(&format!(
                     "    {} = extractvalue {} {}, {}\n",
                     self.get_id(*dst),
@@ -270,6 +296,103 @@ impl Compiler {
                     self.get_id(*src),
                     offset
                 ));
+            }
+            Instr::AssignUn { dst, op, ty, src } => match op {
+                UnOp::Not => {
+                    self.insert_id(*dst, *ty);
+                    self.push_str(&format!("    {} = icmp eq i1 0, ", self.get_id(*dst)));
+                    self.compile_value_only(src);
+                    self.push_newline();
+                }
+                UnOp::IsVoid => match ty {
+                    Type::Ptr => {
+                        let Value::Id(src) = src else { unreachable!() };
+                        self.insert_id(*dst, Type::I1);
+                        self.push_str(&format!(
+                            "    {} = icmp eq ptr {}, null\n",
+                            self.get_id(*dst),
+                            self.get_id(*src)
+                        ));
+                    }
+                    _ => unreachable!(),
+                },
+                UnOp::Complement => {
+                    self.insert_id(*dst, Type::I64);
+                    self.push_str(&format!("    {} = sub i64 0, ", self.get_id(*dst)));
+                    self.compile_value_only(src);
+                    self.push_newline();
+                }
+            },
+            Instr::AssignBin { dst, op, lhs, rhs } => match op {
+                BinOp::Add => {
+                    self.insert_id(*dst, Type::I64);
+                    self.push_str(&format!("    {} = add i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Sub => {
+                    self.insert_id(*dst, Type::I64);
+                    self.push_str(&format!("    {} = sub i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Mul => {
+                    self.insert_id(*dst, Type::I64);
+                    self.push_str(&format!("    {} = mul i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Div => {
+                    self.insert_id(*dst, Type::I64);
+                    self.push_str(&format!("    {} = sdiv i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Lt => {
+                    self.insert_id(*dst, Type::I1);
+                    self.push_str(&format!("    {} = icmp slt i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Le => {
+                    self.insert_id(*dst, Type::I1);
+                    self.push_str(&format!("    {} = icmp sle i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+                BinOp::Eq => {
+                    self.insert_id(*dst, Type::I1);
+                    self.push_str(&format!("    {} = icmp eq i64 ", self.get_id(*dst)));
+                    self.compile_value_only(lhs);
+                    self.push_str(", ");
+                    self.compile_value_only(rhs);
+                    self.push_newline();
+                }
+            },
+            Instr::AssignPhi(dst, ty, preds) => {
+                self.insert_id(*dst, *ty);
+                self.push_str(&format!("    {} = phi {} ", self.get_id(*dst), ty));
+                for (i, (val, pred)) in preds.iter().enumerate() {
+                    self.push_str("[ ");
+                    self.compile_value_only(val);
+                    self.push_str(&format!(", %{} ]", pred));
+                    if i + 1 < preds.len() {
+                        self.push_str(", ");
+                    }
+                }
+                self.push_newline();
             }
 
             _ => todo!("{:?}", instr),

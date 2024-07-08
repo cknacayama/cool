@@ -277,18 +277,19 @@ IO.out_string:
 # TODO: implement IO.out_int
     .globl IO.out_int
 IO.out_int:
-    push    QWORD PTR [rsp + 24] # n
+    push    rdi
+    push    rsi
+    
+    mov     rdi, rdx
     call    convert.itoa
-    add     rsp, 8
 
-    mov     rsi, rdx
-    mov     rdx, rax
+    mov     rsi, rax
     mov     rax, 1
     mov     rdi, 1
     syscall
 
-    mov     rax, QWORD PTR [rsp + 8]
-    mov     rdx, QWORD PTR [rsp + 16]
+    pop     rdx
+    pop     rax
 
     ret
 
@@ -384,12 +385,10 @@ allocator.alloc:
     .globl  memory.copy
 #   void* memory.copy(void* dest, const void* src, size_t size)
 memory.copy:
-    mov     rdi, QWORD PTR [rsp + 8] # dest
-    mov     rsi, QWORD PTR [rsp + 16] # src
     mov     rax, 0 # i = 0
 #   for (size_t i = 0; i < size; i++)
 .memory.copy_L1:
-    cmp     rax, QWORD PTR [rsp + 24] # size
+    cmp     rax, rdx # size
     jae     .memory.copy_L2
     movzx   ecx, BYTE PTR [rsi + rax]
     mov     BYTE PTR [rdi + rax], cl
@@ -428,8 +427,6 @@ memory.compare:
 class.distance:
     xor     eax, eax
 
-    mov     rdi, QWORD PTR [rsp + 8] # T1
-    mov     rsi, QWORD PTR [rsp + 16] # T2
     cmp     rdi, rsi
     jne     .class.distance_L2
     ret
@@ -450,7 +447,6 @@ class.distance:
 #   String convert.itoa(int64_t n)
 #   use string immediately after calling this function
 convert.itoa:
-    mov     rdi, QWORD PTR [rsp + 8] # n
     lea     r10, BYTE PTR [rip + io_out_int_buf] # buf
     mov     r8, 0 # len
     mov     r9, 20
@@ -480,19 +476,17 @@ convert.itoa:
 .convert.itoa_L2:
     mov     r9, 21
     sub     r9, r8
-    lea     rdx, BYTE PTR [r10 + r9]
-    mov     rax, r8
+    lea     rax, BYTE PTR [r10 + r9]
+    mov     rdx, r8
     ret
 
     .globl convert.atoi
 #   int64_t convert.atoi(String s)
 convert.atoi:
     mov     rax, 0 # n
-    mov     rdi, QWORD PTR [rsp + 8] # len
-    test    rdi, rdi
+    test    rsi, rsi
     je      .convert.atoi_L3
 
-    mov     rsi, QWORD PTR [rsp + 16] # content
     movzx   r9d, BYTE PTR [rsi]
     cmp     r9, 45 # '-'
     sete    r9b
@@ -501,9 +495,9 @@ convert.atoi:
     mov     rdx, 10
 #   for (size_t i = 0; i < len; i++)
 .convert.atoi_L1:
-    cmp     r8, rdi
+    cmp     r8, rsi
     jae     .convert.atoi_L2
-    movzx   ecx, BYTE PTR [rsi + r8]
+    movzx   ecx, BYTE PTR [rdi + r8]
     sub     rcx, 48 # s[i] - '0'
     imul    rax, rdx
     add     rax, rcx

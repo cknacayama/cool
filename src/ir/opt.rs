@@ -10,6 +10,7 @@ use crate::{
 use super::{
     block::BlockId,
     builder::{FunctionBuilder, GlobalValue, IrBuilder},
+    types::Type,
     GlobalId, Instr, IrId, LocalId, Value,
 };
 
@@ -112,7 +113,7 @@ impl Function {
         let iter = self
             .instrs_block_iter_mut(block)
             .filter_map(|(id, instr)| match instr {
-                Instr::AssignPhi(_, args) => Some((id, args)),
+                Instr::AssignPhi(_, _, args) => Some((id, args)),
                 _ => None,
             });
 
@@ -404,7 +405,7 @@ impl FunctionOptmizer {
                     *on_true = new_blocks[*on_true];
                     *on_false = new_blocks[*on_false];
                 }
-                Instr::AssignPhi(_, vals) => {
+                Instr::AssignPhi(_, _, vals) => {
                     vals.iter_mut().for_each(|(_, block)| {
                         *block = new_blocks[*block];
                     });
@@ -449,7 +450,7 @@ impl FunctionOptmizer {
                         *on_false = new_target
                     }
                 }
-                Instr::AssignPhi(id, vals) => {
+                Instr::AssignPhi(_, _, vals) => {
                     vals.retain_mut(|(_, block)| match new_blocks[*block] {
                         Some(new_block) => {
                             *block = new_block;
@@ -459,9 +460,6 @@ impl FunctionOptmizer {
                     });
                     if vals.is_empty() {
                         instr.replace_with_nop();
-                    } else if vals.len() == 1 {
-                        let val = std::mem::take(&mut vals[0].0);
-                        *instr = Instr::Assign(*id, val);
                     }
                 }
                 _ => {}
@@ -682,9 +680,10 @@ impl FunctionOptmizer {
                 self.instrs_mut().push(Instr::Label(block));
             }
             self.instrs_mut()
-                .extend(phis.into_iter().map(|(local, args, _)| {
+                .extend(phis.into_iter().map(|(local, args, ty)| {
                     Instr::AssignPhi(
                         IrId::Local(local),
+                        ty.into(),
                         args.into_vec()
                             .into_iter()
                             .map(|(val, block)| (Value::Id(IrId::Local(val)), block))
@@ -826,11 +825,15 @@ impl Instr {
                 *self = Self::Nop;
             }
 
-            Self::JmpCond { src: id, .. } => {
+            Self::JmpCond {
+                src: Value::Id(id), ..
+            } => {
                 let cur_id = renames.get(id).unwrap().last().unwrap();
                 *id = *cur_id;
                 update_var_uses(uses, cur_id, instr_id);
             }
+
+            Self::JmpCond { .. } => {}
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
@@ -859,23 +862,31 @@ impl Instr {
                 }
             }
 
-            Self::Store { dst, src, .. } => match src {
+            Self::Store { dst, src, ty } => match src {
                 Value::Id(id) => {
                     let cur_id = *renames.get(id).unwrap().last().unwrap();
                     let new_id = tmp.next();
                     let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
-                    *self = Self::Assign(new_id, Value::Id(cur_id));
+                    *self = Self::Assign {
+                        dst: new_id,
+                        ty:  *ty,
+                        src: Value::Id(cur_id),
+                    };
                     update_var_uses(uses, &cur_id, instr_id);
                     update_var_use_decl(uses, new_id, instr_id);
                     return Some(old_id);
                 }
-                val => {
+                src => {
                     let new_id = tmp.next();
                     let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
-                    let val = std::mem::take(val);
-                    *self = Self::Assign(new_id, val);
+                    let src = std::mem::take(src);
+                    *self = Self::Assign {
+                        dst: new_id,
+                        ty: *ty,
+                        src,
+                    };
                     update_var_use_decl(uses, new_id, instr_id);
                     return Some(old_id);
                 }
@@ -890,12 +901,16 @@ impl Instr {
                 return Some(old_id);
             }
 
-            Self::AssignLoad { dst, src, .. } if src.is_local() => {
+            Self::AssignLoad { dst, src, ty } if src.is_local() => {
                 let cur_id2 = *renames.get(src).unwrap().last().unwrap();
                 let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
-                *self = Self::Assign(new_id, Value::Id(cur_id2));
+                *self = Self::Assign {
+                    dst: new_id,
+                    src: Value::Id(cur_id2),
+                    ty:  *ty,
+                };
                 update_var_uses(uses, &cur_id2, instr_id);
                 update_var_use_decl(uses, new_id, instr_id);
                 return Some(old_id);
@@ -953,8 +968,16 @@ impl Instr {
                 return Some(old_id);
             }
 
-            Self::Assign(dst, Value::Id(src))
-            | Self::AssignUn { dst, src, .. }
+            Self::Assign {
+                dst,
+                src: Value::Id(src),
+                ..
+            }
+            | Self::AssignUn {
+                dst,
+                src: Value::Id(src),
+                ..
+            }
             | Self::AssignBin {
                 dst,
                 lhs: Value::Id(src),
@@ -1001,7 +1024,10 @@ impl Instr {
                 return Some(old_id);
             }
 
-            Self::Assign(dst, _) | Self::AssignBin { dst, .. } | Self::AssignPhi(dst, _) => {
+            Self::Assign { dst, .. }
+            | Self::AssignUn { dst, .. }
+            | Self::AssignBin { dst, .. }
+            | Self::AssignPhi(dst, _, _) => {
                 let new_id = tmp.next();
                 let old_id = *dst;
                 renames.entry(old_id).or_default().push(new_id);
@@ -1015,7 +1041,7 @@ impl Instr {
     }
 
     fn replace_with_nop(&mut self) {
-        *self = Self::Nop;
+        *self = Self::Nop
     }
 
     #[inline]
@@ -1025,26 +1051,28 @@ impl Instr {
         uses: &mut FxHashMap<IrId, VarUses>,
     ) -> Option<VarUses> {
         match self {
-            Instr::Assign(id, val) => {
-                let mut val = std::mem::take(val);
+            Instr::Assign { dst, src, .. } => {
+                let mut val = std::mem::take(src);
                 Self::try_replace(values, &mut val);
-                let folded = uses.remove(id).unwrap();
+                let folded = uses.remove(dst).unwrap();
                 if let Value::Id(ref id) = val {
                     let uses_mut = uses.get_mut(id).unwrap();
                     uses_mut.uses.extend(folded.uses.iter());
                     uses_mut.uses.remove(&folded.decl);
                 }
-                values.insert(*id, val);
+                values.insert(*dst, val);
                 self.replace_with_nop();
                 Some(folded)
             }
-            Instr::AssignUn { op, dst, src, .. } => {
+            Instr::AssignUn { op, dst, src, ty } => {
                 let op = *op;
                 let dst = *dst;
-                Self::try_replace_id(values, src);
-                if Self::const_fold_un(values, op, dst, src) {
+                Self::try_replace(values, src);
+                if Self::const_fold_un(values, op, dst, *ty, src) {
                     let folded = uses.remove(&dst).unwrap();
-                    uses.get_mut(src).unwrap().uses.remove(&folded.decl);
+                    if let Value::Id(src) = src {
+                        uses.get_mut(src).unwrap().uses.remove(&folded.decl);
+                    }
                     self.replace_with_nop();
                     Some(folded)
                 } else {
@@ -1076,11 +1104,11 @@ impl Instr {
                 on_true,
                 on_false,
             } => {
-                Self::try_replace_id(values, src);
+                Self::try_replace(values, src);
                 let id = *src;
                 let on_true = *on_true;
                 let on_false = *on_false;
-                self.const_fold_jmp_cond(values, id, on_true, on_false);
+                self.const_fold_jmp_cond(id, on_true, on_false);
                 None
             }
 
@@ -1100,7 +1128,7 @@ impl Instr {
                 Self::try_replace(values, val);
                 None
             }
-            Instr::AssignPhi(_, vals) => {
+            Instr::AssignPhi(_, _, vals) => {
                 for (val, _) in vals.iter_mut() {
                     Self::try_replace(values, val);
                 }
@@ -1145,15 +1173,9 @@ impl Instr {
         }
     }
 
-    fn const_fold_jmp_cond(
-        &mut self,
-        values: &mut FxHashMap<IrId, Value>,
-        id: IrId,
-        on_true: BlockId,
-        on_false: BlockId,
-    ) {
-        if let Some(Value::Bool(val)) = values.get(&id) {
-            if *val {
+    fn const_fold_jmp_cond(&mut self, src: Value, on_true: BlockId, on_false: BlockId) {
+        if let Value::Bool(val) = src {
+            if val {
                 *self = Instr::Jmp(on_true);
             } else {
                 *self = Instr::Jmp(on_false);
@@ -1161,22 +1183,31 @@ impl Instr {
         }
     }
 
-    fn const_fold_un(values: &mut FxHashMap<IrId, Value>, op: UnOp, id: IrId, arg: &IrId) -> bool {
+    fn const_fold_un(
+        values: &mut FxHashMap<IrId, Value>,
+        op: UnOp,
+        id: IrId,
+        ty: Type,
+        arg: &Value,
+    ) -> bool {
         match op {
-            UnOp::IsVoid => match values.get(arg) {
-                Some(Value::Int(_) | Value::Bool(_)) => {
+            UnOp::IsVoid => {
+                if matches!(ty, Type::String | Type::I1 | Type::I64) {
                     values.insert(id, Value::Bool(false));
-                    true
+                    return true;
                 }
-                Some(Value::Void) => {
-                    values.insert(id, Value::Bool(true));
-                    true
-                }
-                _ => false,
-            },
 
-            UnOp::Complement => match values.get(arg) {
-                Some(Value::Int(arg)) => {
+                match arg {
+                    Value::Void => {
+                        values.insert(id, Value::Bool(true));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+
+            UnOp::Complement => match arg {
+                Value::Int(arg) => {
                     let val = -arg;
                     values.insert(id, Value::Int(val));
                     true
@@ -1184,8 +1215,8 @@ impl Instr {
                 _ => false,
             },
 
-            UnOp::Not => match values.get(arg) {
-                Some(Value::Bool(arg)) => {
+            UnOp::Not => match arg {
+                Value::Bool(arg) => {
                     let val = !arg;
                     values.insert(id, Value::Bool(val));
                     true
