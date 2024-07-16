@@ -87,13 +87,21 @@ impl Function {
                 f(on_true);
                 f(on_false);
             }
+            Instr::Switch {
+                default, ref cases, ..
+            } => {
+                f(default);
+                for case in cases.iter().map(|c| c.1) {
+                    f(case);
+                }
+            }
             Instr::Return(_) => {}
             _ => unreachable!(),
         }
     }
 
     fn predecessors(&self) -> Predecessors {
-        let mut preds = index_vec![vec![]; self.blocks.len()];
+        let mut preds = index_vec![Vec::new(); self.blocks.len()];
 
         for bb in self.blocks.indices() {
             self.successors_visit(bb, |succ| preds[succ].push(bb));
@@ -142,7 +150,6 @@ impl Function {
                 let position = preds[target].iter().position(|&p| p == block).unwrap();
                 self.rename_phi_arg(block, target, renames, position, uses);
             }
-
             Instr::JmpCond {
                 on_true, on_false, ..
             } => {
@@ -150,6 +157,16 @@ impl Function {
                 self.rename_phi_arg(block, on_true, renames, position, uses);
                 let position = preds[on_false].iter().position(|&p| p == block).unwrap();
                 self.rename_phi_arg(block, on_false, renames, position, uses);
+            }
+            Instr::Switch {
+                default, ref cases, ..
+            } => {
+                for b in cases.iter().map(|c| c.1).collect::<Vec<_>>() {
+                    let pos = preds[b].iter().position(|&p| p == block).unwrap();
+                    self.rename_phi_arg(block, b, renames, pos, uses);
+                }
+                let position = preds[default].iter().position(|&p| p == block).unwrap();
+                self.rename_phi_arg(block, default, renames, position, uses);
             }
             Instr::Return(_) => {}
             _ => unreachable!(),
@@ -202,9 +219,7 @@ pub struct FunctionOptmizer {
 }
 
 impl FunctionOptmizer {
-    pub fn from_builder(mut builder: FunctionBuilder) -> Self {
-        builder.set_labels();
-
+    pub fn from_builder(builder: FunctionBuilder) -> Self {
         let mut instrs = IndexVec::new();
         let mut blocks = IndexVec::with_capacity(builder.blocks.len());
 
@@ -410,6 +425,12 @@ impl FunctionOptmizer {
                         *block = new_blocks[*block];
                     });
                 }
+                Instr::Switch { default, cases, .. } => {
+                    *default = new_blocks[*default];
+                    cases.iter_mut().for_each(|(_, block)| {
+                        *block = new_blocks[*block];
+                    });
+                }
                 Instr::Label(block) => {
                     *block = new_blocks[*block];
                 }
@@ -450,7 +471,7 @@ impl FunctionOptmizer {
                         *on_false = new_target
                     }
                 }
-                Instr::AssignPhi(_, _, vals) => {
+                Instr::AssignPhi(id, ty, vals) => {
                     vals.retain_mut(|(_, block)| match new_blocks[*block] {
                         Some(new_block) => {
                             *block = new_block;
@@ -458,9 +479,24 @@ impl FunctionOptmizer {
                         }
                         None => false,
                     });
-                    if vals.is_empty() {
+                    if vals.len() == 1 {
+                        *instr = Instr::Assign {
+                            dst: *id,
+                            src: vals[0].0,
+                            ty:  *ty,
+                        };
+                    } else if vals.is_empty() {
                         instr.replace_with_nop();
                     }
+                }
+                Instr::Switch { default, cases, .. } => {
+                    if let Some(new_target) = new_blocks[*default] {
+                        *default = new_target
+                    }
+                    cases
+                        .iter_mut()
+                        .filter_map(|(_, b)| new_blocks[*b].map(|new| (b, new)))
+                        .for_each(|(case, new)| *case = new)
                 }
                 _ => {}
             }
@@ -498,7 +534,7 @@ impl FunctionOptmizer {
     }
 
     fn dominance_frontiers(&self, preds: &Predecessors) -> DominanceFrontiers {
-        let mut frontiers = index_vec![vec![]; self.blocks_count()];
+        let mut frontiers = index_vec![Vec::new(); self.blocks_count()];
 
         for bb in self.block_ids().filter(|b| preds[*b].len() >= 2) {
             let idom = self.idoms[bb];
@@ -522,7 +558,7 @@ impl FunctionOptmizer {
         let mut stores = IndexVec::with_capacity(self.locals.len());
 
         for block in self.locals.inner().iter().map(|(_, block)| *block) {
-            stores.push((block, vec![]));
+            stores.push((block, Vec::new()));
         }
 
         for block_id in self.block_ids() {
@@ -539,7 +575,7 @@ impl FunctionOptmizer {
     }
 
     fn all_locals_uses(&self) -> IndexVec<LocalId, (BlockId, Vec<BlockId>)> {
-        let mut uses = index_vec![(BlockId::ENTRY, vec![]); self.locals.len()];
+        let mut uses = index_vec![(BlockId::ENTRY, Vec::new()); self.locals.len()];
 
         for block_id in self.block_ids() {
             for instr in self.instrs_block(block_id) {
@@ -594,7 +630,7 @@ impl FunctionOptmizer {
         preds: &Predecessors,
         dom_frontiers: &DominanceFrontiers,
     ) -> PhiPositions {
-        let mut phi_positions: PhiPositions = index_vec![vec![]; self.blocks_count()];
+        let mut phi_positions: PhiPositions = index_vec![Vec::new(); self.blocks_count()];
         let (live_in, _) = self.local_liveness_check(preds);
         let stores = self.all_stores();
 
@@ -631,7 +667,7 @@ impl FunctionOptmizer {
             dom_tree: &DominatorTree,
             uses: &mut FxHashMap<IrId, VarUses>,
         ) {
-            let mut defined = vec![];
+            let mut defined = Vec::new();
 
             for (id, instr) in function.instrs_block_iter_mut(block) {
                 if let Some(id) = instr.rename(id, renames, cur_tmp, uses) {
@@ -827,13 +863,16 @@ impl Instr {
 
             Self::JmpCond {
                 src: Value::Id(id), ..
+            }
+            | Self::Switch {
+                src: Value::Id(id), ..
             } => {
                 let cur_id = renames.get(id).unwrap().last().unwrap();
                 *id = *cur_id;
                 update_var_uses(uses, cur_id, instr_id);
             }
 
-            Self::JmpCond { .. } => {}
+            Self::JmpCond { .. } | Self::Switch { .. } => {}
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
@@ -1009,7 +1048,7 @@ impl Instr {
                     update_var_uses(uses, cur_id2, instr_id);
                 }
                 for id in args.iter_mut().filter_map(|(_, val)| match val {
-                    Value::Id(id) => Some(id),
+                    Value::Id(id) if !id.is_global() => Some(id),
                     _ => None,
                 }) {
                     let cur_id = renames.get(id).unwrap().last().unwrap();
@@ -1070,9 +1109,6 @@ impl Instr {
                 Self::try_replace(values, src);
                 if Self::const_fold_un(values, op, dst, *ty, src) {
                     let folded = uses.remove(&dst).unwrap();
-                    if let Value::Id(src) = src {
-                        uses.get_mut(src).unwrap().uses.remove(&folded.decl);
-                    }
                     self.replace_with_nop();
                     Some(folded)
                 } else {
@@ -1086,12 +1122,6 @@ impl Instr {
                 Self::try_replace(values, rhs);
                 if Self::const_fold_bin(values, op, dst, lhs, rhs) {
                     let folded = uses.remove(&dst).unwrap();
-                    if let Value::Id(lhs) = lhs {
-                        uses.get_mut(lhs).unwrap().uses.remove(&folded.decl);
-                    }
-                    if let Value::Id(rhs) = rhs {
-                        uses.get_mut(rhs).unwrap().uses.remove(&folded.decl);
-                    }
                     self.replace_with_nop();
                     Some(folded)
                 } else {
@@ -1105,10 +1135,16 @@ impl Instr {
                 on_false,
             } => {
                 Self::try_replace(values, src);
-                let id = *src;
+                let src = *src;
                 let on_true = *on_true;
                 let on_false = *on_false;
-                self.const_fold_jmp_cond(id, on_true, on_false);
+                self.const_fold_jmp_cond(src, on_true, on_false);
+                None
+            }
+
+            Instr::Switch { src, .. } => {
+                Self::try_replace(values, src);
+                self.const_fold_switch();
                 None
             }
 
@@ -1160,7 +1196,7 @@ impl Instr {
     fn try_replace(values: &FxHashMap<IrId, Value>, val: &mut Value) {
         while let Value::Id(id) = val {
             match values.get(id) {
-                Some(new_val) => *val = new_val.clone(),
+                Some(new_val) => *val = *new_val,
                 None => break,
             }
         }
@@ -1173,16 +1209,36 @@ impl Instr {
         }
     }
 
+    #[inline]
     fn const_fold_jmp_cond(&mut self, src: Value, on_true: BlockId, on_false: BlockId) {
         if let Value::Bool(val) = src {
             if val {
-                *self = Instr::Jmp(on_true);
+                *self = Instr::Jmp(on_true)
             } else {
-                *self = Instr::Jmp(on_false);
+                *self = Instr::Jmp(on_false)
             }
         }
     }
 
+    #[inline]
+    fn const_fold_switch(&mut self) {
+        let Instr::Switch {
+            src,
+            default,
+            cases,
+        } = self
+        else {
+            unreachable!()
+        };
+        if let Value::Int(val) = src {
+            match cases.iter().find(|(i, _)| i == val) {
+                Some((_, block)) => *self = Instr::Jmp(*block),
+                None => *self = Instr::Jmp(*default),
+            }
+        }
+    }
+
+    #[inline]
     fn const_fold_un(
         values: &mut FxHashMap<IrId, Value>,
         op: UnOp,
@@ -1229,7 +1285,7 @@ impl Instr {
     fn const_fold_bin(
         values: &mut FxHashMap<IrId, Value>,
         op: BinOp,
-        id: IrId,
+        dst: IrId,
         lhs: &Value,
         rhs: &Value,
     ) -> bool {
@@ -1238,31 +1294,31 @@ impl Instr {
                 match op {
                     BinOp::Add => {
                         let val = lhs + rhs;
-                        values.insert(id, Value::Int(val));
+                        values.insert(dst, Value::Int(val));
                     }
                     BinOp::Sub => {
                         let val = lhs - rhs;
-                        values.insert(id, Value::Int(val));
+                        values.insert(dst, Value::Int(val));
                     }
                     BinOp::Mul => {
                         let val = lhs * rhs;
-                        values.insert(id, Value::Int(val));
+                        values.insert(dst, Value::Int(val));
                     }
                     BinOp::Div => {
                         let val = lhs / rhs;
-                        values.insert(id, Value::Int(val));
+                        values.insert(dst, Value::Int(val));
                     }
                     BinOp::Lt => {
                         let val = lhs < rhs;
-                        values.insert(id, Value::Bool(val));
+                        values.insert(dst, Value::Bool(val));
                     }
                     BinOp::Le => {
                         let val = lhs <= rhs;
-                        values.insert(id, Value::Bool(val));
+                        values.insert(dst, Value::Bool(val));
                     }
                     BinOp::Eq => {
                         let val = lhs == rhs;
-                        values.insert(id, Value::Bool(val));
+                        values.insert(dst, Value::Bool(val));
                     }
                 }
                 true
@@ -1281,10 +1337,10 @@ pub struct IrOptmizer {
 
 impl IrOptmizer {
     pub fn from_builder(builder: IrBuilder) -> Self {
-        let mut functions = vec![];
+        let mut functions = Vec::new();
         let empty_string = builder.strings().get_key_value("").unwrap().0.clone();
         let mut globals = index_vec![empty_string; builder.globals.len()];
-        let mut vtables = vec![];
+        let mut vtables = Vec::new();
         let mut strings = FxHashMap::default();
 
         for (id, global) in builder.globals.into_iter() {

@@ -25,7 +25,7 @@ impl<'a> Default for Checker<'a> {
 impl<'a> Checker<'a> {
     pub fn new() -> Self {
         Self {
-            object_envs:  vec![],
+            object_envs:  Vec::new(),
             is_in_method: false,
             env_ready:    false,
             class_env:    ClassEnv::new(),
@@ -35,7 +35,7 @@ impl<'a> Checker<'a> {
 
     fn from_class_env(env: ClassEnv<'a>) -> Self {
         Self {
-            object_envs:  vec![],
+            object_envs:  Vec::new(),
             is_in_method: false,
             env_ready:    true,
             class_env:    env,
@@ -163,8 +163,8 @@ impl<'a> Checker<'a> {
 
         self.insert_object("self", ty);
 
-        let mut attrs = vec![];
-        let mut methods = vec![];
+        let mut attrs = Vec::new();
+        let mut methods = Vec::new();
 
         for feature in features.into_vec() {
             match feature.kind {

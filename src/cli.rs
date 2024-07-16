@@ -83,8 +83,7 @@ impl Config {
         writeln!(stream, "  -O        Optimize IR")?;
         writeln!(stream, "  -S        Generate assembly")?;
         writeln!(stream, "  -o <path> Output file path")?;
-        writeln!(stream, "  -h        Print this help message")?;
-        Ok(())
+        writeln!(stream, "  -h        Print this help message")
     }
 
     pub fn build(mut args: impl Iterator<Item = String>) -> Result<Self, Error<'static>> {
@@ -171,9 +170,6 @@ impl Config {
                 for typed in typed {
                     ir_builder.build_class(typed);
                 }
-                for function in ir_builder.functions_mut() {
-                    function.set_labels();
-                }
                 let globals = ir_builder
                     .globals_names()
                     .map(|(id, name)| (id, name.clone()))
@@ -236,7 +232,7 @@ impl Config {
         } else {
             eprintln!("{}", e);
         }
-        std::process::exit(1);
+        std::process::exit(1)
     }
 }
 

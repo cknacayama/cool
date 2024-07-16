@@ -23,17 +23,6 @@ pub enum Value {
     Bool(bool),
 }
 
-impl Value {
-    pub fn to_llvm_string(&self) -> String {
-        match self {
-            Value::Id(id) => format!("{}", id),
-            Value::Int(val) => format!("{}", val),
-            Value::Bool(val) => format!("{}", val),
-            Value::Void => "{ ptr null, ptr null }".to_string(),
-        }
-    }
-}
-
 impl fmt::Display for Value {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,6 +66,11 @@ pub enum Instr {
         src:      Value,
         on_true:  BlockId,
         on_false: BlockId,
+    },
+    Switch {
+        src:     Value,
+        default: BlockId,
+        cases:   Vec<(i64, BlockId)>,
     },
 
     Assign {
@@ -135,7 +129,10 @@ pub enum Instr {
 
 impl Instr {
     pub fn is_block_end(&self) -> bool {
-        matches!(self, Self::Return(_) | Self::Jmp(_) | Self::JmpCond { .. })
+        matches!(
+            self,
+            Self::Return(_) | Self::Jmp(_) | Self::JmpCond { .. } | Self::Switch { .. }
+        )
     }
 
     pub fn is_function(&self) -> bool {
@@ -176,9 +173,13 @@ impl Instr {
             Self::JmpCond {
                 src: Value::Id(src),
                 ..
+            }
+            | Self::Switch {
+                src: Value::Id(src),
+                ..
             } => (None, Some([*src].into())),
 
-            Self::JmpCond { .. } => (None, None),
+            Self::JmpCond { .. } | Self::Switch { .. } => (None, None),
 
             Self::Return(val) => {
                 if let Value::Id(id) = val {
@@ -298,14 +299,28 @@ impl fmt::Display for Instr {
                 write!(f, ") {{")
             }
             Instr::Return(id) => write!(f, "    ret {}\n}}", id),
-            Instr::Label(subs) => write!(f, "block{}:", subs),
-            Instr::Jmp(subs) => write!(f, "    jmp block{}", subs),
+            Instr::Label(subs) => write!(f, "{}:", subs),
+            Instr::Jmp(subs) => write!(f, "    jmp {}", subs),
             Instr::JmpCond {
                 src,
                 on_true,
                 on_false,
             } => {
-                write!(f, "    {} ? block{} : block{}", src, on_true, on_false)
+                write!(f, "    {} ? {} : {}", src, on_true, on_false)
+            }
+            Instr::Switch {
+                src,
+                default,
+                cases,
+            } => {
+                write!(f, "    switch {} default: {}, [", src, default)?;
+                for (i, (val, block)) in cases.iter().enumerate() {
+                    write!(f, "{}: {}", val, block)?;
+                    if i != cases.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]")
             }
             Instr::Assign { dst, ty, src } => {
                 write!(f, "    {} = {} {}", dst, ty, src)
@@ -354,7 +369,7 @@ impl fmt::Display for Instr {
             Instr::AssignPhi(id, ty, vals) => {
                 write!(f, "    {} = phi {}", id, ty)?;
                 for (i, (val, block)) in vals.iter().enumerate() {
-                    write!(f, "[{}, block{}]", val, block)?;
+                    write!(f, "[{}, {}]", val, block)?;
                     if i != vals.len() - 1 {
                         write!(f, ", ")?;
                     }
@@ -572,19 +587,38 @@ impl Instr {
                 s
             }
             Instr::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),
-            Instr::Label(subs) => format!("block{}:", subs),
-            Instr::Jmp(subs) => format!("    jmp block{}", subs),
+            Instr::Label(subs) => format!("{}:", subs),
+            Instr::Jmp(subs) => format!("    jmp {}", subs),
             Instr::JmpCond {
                 src,
                 on_true,
                 on_false,
             } => {
                 format!(
-                    "    {} ? block{} : block{}",
+                    "    {} ? {} : {}",
                     src.to_ir_string(globals),
                     on_true,
                     on_false
                 )
+            }
+            Instr::Switch {
+                src,
+                default,
+                cases,
+            } => {
+                let mut s = format!(
+                    "    switch {} default: {}, [",
+                    src.to_ir_string(globals),
+                    default
+                );
+                for (i, (val, block)) in cases.iter().enumerate() {
+                    s.push_str(&format!("{}: {}", val, block));
+                    if i != cases.len() - 1 {
+                        s.push_str(", ");
+                    }
+                }
+                s.push(']');
+                s
             }
             Instr::Assign { dst, ty, src } => {
                 format!(
@@ -664,9 +698,9 @@ impl Instr {
                 )
             }
             Instr::AssignPhi(id, ty, vals) => {
-                let mut s = format!("    {} = phi {}", id, ty);
+                let mut s = format!("    {} = phi {} ", id, ty);
                 for (i, (val, block)) in vals.iter().enumerate() {
-                    s.push_str(&format!("[{}, block{}]", val.to_ir_string(globals), block));
+                    s.push_str(&format!("[{}, {}]", val.to_ir_string(globals), block));
                     if i != vals.len() - 1 {
                         s.push_str(", ");
                     }

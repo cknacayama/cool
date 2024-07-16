@@ -36,6 +36,13 @@ Allocator.Typename:
 Allocator.Typenamelen:
     .quad 9
 
+ClassComparator.Typename:
+    .string "ClassComparatorTypename"
+    .align 8
+ClassComparator.Typenamelen:
+    .quad 23
+
+
 empty_string:
     .string ""
     .align 8
@@ -96,6 +103,22 @@ Object.type_name:
 Object.copy:
     mov     rax, rdi
     mov     rdx, rsi
+    ret
+
+    .globl Object.To_Bool
+Object.To_Bool:
+    movzx   rax, BYTE PTR [rdi]
+    ret
+    
+    .globl Object.To_Int
+Object.To_Int:
+    mov     rax, QWORD PTR [rdi]
+    ret
+
+    .globl Object.To_String
+Object.To_String:
+    mov     rax, QWORD PTR [rdi]
+    mov     rdx, QWORD PTR [rdi + 8]
     ret
 
     .globl String.new
@@ -353,6 +376,31 @@ Allocator.alloc:
 Allocator.free:
     ret
 
+    .globl ClassComparator.new
+ClassComparator.new:
+    mov     rax, rdi
+    lea     rdx, QWORD PTR [rip + IO.Table]
+    ret
+
+    .globl ClassComparator.type_name
+ClassComparator.type_name:
+    lea     rax, QWORD PTR [rip + Allocator.Typename]
+    mov     rdx, QWORD PTR [rip + Allocator.Typenamelen]
+    ret
+
+    .globl ClassComparator.copy
+ClassComparator.copy:
+    mov     rax, rdi
+    mov     rdx, rsi
+    ret
+
+    .globl ClassComparator.compare
+ClassComparator.compare:
+    mov     rdi, rdx
+    mov     rsi, rcx
+    call    class.distance
+    ret
+
     .globl allocator.init
 #   void allocator.init(void);
 allocator.init:
@@ -401,12 +449,10 @@ memory.copy:
     .globl memory.compare
 #   Bool memory.compare(const void* ptr1, const void* ptr2, size_t size)
 memory.compare:
-    mov     rdi, QWORD PTR [rsp + 8] # ptr1
-    mov     rsi, QWORD PTR [rsp + 16] # ptr2
     mov     rax, 0 # i = 0
 #   for (size_t i = 0; i < size; i++)
 .memory.compare_L1:
-    cmp     rax, QWORD PTR [rsp + 24] # size
+    cmp     rax, rdx # size
     jae     .memory.compare_L2
     add     rax, 1
     movzx   ecx, BYTE PTR [rdi + rax - 1]

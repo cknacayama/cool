@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::{
     ast::{
-        TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
+        BinOp, TypedAttribute, TypedCaseArm, TypedClass, TypedExpr, TypedExprKind, TypedFormal,
         TypedMethod, UnOp,
     },
     fxhash::FxHashMap,
@@ -42,10 +42,6 @@ impl<'a> FunctionBuilder<'a> {
             idoms: index_vec![BlockId::ENTRY],
             dom_tree: index_vec![Vec::new()],
         }
-    }
-
-    pub fn push_front(&mut self, block: BlockId, instr: Instr) {
-        self.blocks[block].push_front(instr)
     }
 
     pub fn locals(&self) -> &IndexVec<LocalId, (TypeId, BlockId)> {
@@ -90,12 +86,6 @@ impl<'a> FunctionBuilder<'a> {
             .flat_map(|b| b.instrs.iter_mut().filter(|i| !i.is_nop()))
     }
 
-    pub fn set_labels(&mut self) {
-        for b in self.blocks.inner_mut() {
-            b.set_label();
-        }
-    }
-
     fn get_local(&self, name: &'a str) -> Option<IrId> {
         self.cur_locals
             .iter()
@@ -127,19 +117,20 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     fn last_instr(&self) -> &Instr {
-        self.blocks.last().unwrap().instrs.back().unwrap()
+        self.blocks.last().unwrap().instrs.last().unwrap()
     }
 
     fn begin_block(&mut self) -> BlockId {
         assert!(self.blocks.len() < u32::MAX as usize);
         assert!(self.cur_locals.len() < u32::MAX as usize);
         let id = BlockId(self.blocks.len() as u32);
-        let block = Block::new(id);
+        let mut block = Block::new(id);
         let inserted_jmp = !self.last_instr().is_block_end();
         if inserted_jmp {
             self.push_instr(Instr::Jmp(id));
         }
         let cur_block = self.cur_block();
+        block.push(Instr::Label(id));
         self.blocks.push(block);
         self.idoms.push(BlockId::ENTRY);
         self.dom_tree.push(Vec::new());
@@ -150,7 +141,7 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     fn patch_jmp_cond(&mut self, block: BlockId, on_true: BlockId, on_false: BlockId) {
-        let instr = self.blocks[block].instrs.back_mut().unwrap();
+        let instr = self.blocks[block].instrs.last_mut().unwrap();
         match instr {
             Instr::JmpCond { src, .. } => {
                 let src = *src;
@@ -165,13 +156,10 @@ impl<'a> FunctionBuilder<'a> {
 
         self.set_pred(on_true, block);
         self.set_pred(on_false, block);
-
-        self.set_dom(block, on_true);
-        self.set_dom(block, on_false);
     }
 
     fn patch_jmp(&mut self, block: BlockId, target: BlockId) {
-        let instr = self.blocks[block].instrs.back_mut().unwrap();
+        let instr = self.blocks[block].instrs.last_mut().unwrap();
         match instr {
             Instr::Jmp(_) => {
                 *instr = Instr::Jmp(target);
@@ -179,6 +167,33 @@ impl<'a> FunctionBuilder<'a> {
             _ => unreachable!(),
         }
         self.set_pred(target, block);
+    }
+
+    fn patch_switch<I>(&mut self, block: BlockId, default: BlockId, cases: I)
+    where
+        I: Iterator<Item = BlockId> + Clone,
+    {
+        let instr = self.blocks[block].instrs.last_mut().unwrap();
+        match instr {
+            Instr::Switch { src, .. } => {
+                let src = *src;
+                let cases = cases
+                    .clone()
+                    .enumerate()
+                    .map(|(i, case)| (i as i64, case))
+                    .collect();
+                *instr = Instr::Switch {
+                    src,
+                    cases,
+                    default,
+                };
+            }
+            _ => unreachable!(),
+        }
+
+        for case in std::iter::once(default).chain(cases) {
+            self.set_pred(case, block);
+        }
     }
 
     fn new_tmp(&mut self) -> IrId {
@@ -193,7 +208,7 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     fn push_instr(&mut self, instr: Instr) {
-        self.blocks.last_mut().unwrap().push_back(instr)
+        self.blocks.last_mut().unwrap().push(instr)
     }
 
     fn set_attrs(&mut self, attrs: &[(&'a str, AttrData, usize)], local_self: Option<IrId>) {
@@ -478,6 +493,13 @@ impl<'a> IrBuilder<'a> {
         self.cur_function_mut().patch_jmp(block, target)
     }
 
+    fn patch_switch<I>(&mut self, block: BlockId, default: BlockId, cases: I)
+    where
+        I: Iterator<Item = BlockId> + Clone,
+    {
+        self.cur_function_mut().patch_switch(block, default, cases)
+    }
+
     fn cur_block(&self) -> BlockId {
         self.cur_function().cur_block()
     }
@@ -736,12 +758,12 @@ impl<'a> IrBuilder<'a> {
         function_params.extend(params.iter().map(|f| (f.ty.into(), function.new_tmp())));
 
         function.begin_scope();
-        let kind = Instr::Function {
+        let instr = Instr::Function {
             id:     function_id,
             ret:    typed_method.return_ty().into(),
             params: function_params.into_boxed_slice(),
         };
-        function.push_instr(kind);
+        function.push_instr(instr);
         function.set_params(params.iter().map(|f| (f.id, f.ty)));
         function.set_attrs(class_attrs, None);
         self.globals[function_id].value = Some(GlobalValue::Function(function));
@@ -808,7 +830,55 @@ impl<'a> IrBuilder<'a> {
                 self.push_instr(kind);
                 Value::Id(tmp)
             }
-            _ => expr,
+            TypeId::INT | TypeId::BOOL | TypeId::STRING => expr,
+            _ => match ty {
+                TypeId::INT => {
+                    let tmp = self.new_tmp();
+                    let function_id = self
+                        .get_global_id(TypeId::OBJECT, "To_Int")
+                        .map(IrId::Global)
+                        .unwrap();
+                    let kind = Instr::AssignCall(
+                        tmp,
+                        Type::I64,
+                        function_id,
+                        Box::new([(Type::Object, expr)]),
+                    );
+                    self.push_instr(kind);
+                    Value::Id(tmp)
+                }
+                TypeId::BOOL => {
+                    let tmp = self.new_tmp();
+                    let function_id = self
+                        .get_global_id(TypeId::OBJECT, "To_Bool")
+                        .map(IrId::Global)
+                        .unwrap();
+                    let kind = Instr::AssignCall(
+                        tmp,
+                        Type::I1,
+                        function_id,
+                        Box::new([(Type::Object, expr)]),
+                    );
+                    self.push_instr(kind);
+                    Value::Id(tmp)
+                }
+                TypeId::STRING => {
+                    let tmp = self.new_tmp();
+                    let function_id = self
+                        .get_global_id(TypeId::OBJECT, "To_String")
+                        .map(IrId::Global)
+                        .unwrap();
+                    let kind = Instr::AssignCall(
+                        tmp,
+                        Type::String,
+                        function_id,
+                        Box::new([(Type::Object, expr)]),
+                    );
+                    self.push_instr(kind);
+                    Value::Id(tmp)
+                }
+                _ => expr,
+            },
         }
     }
 
@@ -965,7 +1035,7 @@ impl<'a> IrBuilder<'a> {
             }
             TEK::If(cond, then, els) => self.build_if(*cond, *then, *els, ty),
             TEK::While(cond, body) => self.build_while(*cond, *body),
-            TEK::Case(expr, cases) => self.build_case(*expr, cases),
+            TEK::Case(expr, cases) => self.build_case(*expr, cases, ty),
         }
     }
 
@@ -973,24 +1043,181 @@ impl<'a> IrBuilder<'a> {
         &mut self,
         expr: TypedExpr<'a>,
         cases: Box<[TypedCaseArm<'a>]>,
+        case_expr_ty: TypeId,
     ) -> (Value, TypeId) {
         let (expr, expr_ty) = self.build_expr(expr);
         let src = self.build_cast(expr, expr_ty);
-        let dst = self.new_tmp();
-        let instr = Instr::AssignExtract {
-            dst,
+        let expr_table = self.new_tmp();
+        self.push_instr(Instr::AssignExtract {
+            dst: expr_table,
             src_ty: Type::Object,
             src,
             ty: Type::Ptr,
             offset: 1,
-        };
-        self.push_instr(instr);
+        });
+        let expr_table = Value::Id(expr_table);
         self.begin_scope();
-        let max = self.push_local("Max", TypeId::INT);
-        for case in cases {
-            let table = self.get_global_id(case.ty, "Table").unwrap();
+        let compare_fn = self
+            .get_global_id(TypeId::COMPARATOR, "compare")
+            .map(IrId::Global)
+            .unwrap();
+        let min = self.push_local("Min", TypeId::INT);
+        self.push_instr(Instr::Store {
+            dst: min,
+            ty:  Type::I64,
+            src: Value::Int(i64::MAX),
+        });
+        let min_ty = self.push_local("MinType", TypeId::INT);
+        self.push_instr(Instr::Store {
+            dst: min_ty,
+            ty:  Type::I64,
+            src: Value::Int(0),
+        });
+        for (i, ty) in cases.iter().map(|c| c.ty).enumerate() {
+            let table = self.get_global_id(ty, "Table").unwrap();
+            let table = Value::Id(IrId::Global(table));
+            let dst = self.new_tmp();
+            self.push_instr(Instr::AssignCall(
+                dst,
+                Type::I64,
+                compare_fn,
+                Box::new([
+                    (Type::Object, Value::Void),
+                    (Type::Ptr, expr_table),
+                    (Type::Ptr, table),
+                ]),
+            ));
+
+            let is_neg = self.new_tmp();
+            self.push_instr(Instr::AssignBin {
+                dst: is_neg,
+                op:  BinOp::Lt,
+                lhs: Value::Id(dst),
+                rhs: Value::Int(0),
+            });
+
+            let is_neg_block = self.cur_block();
+            self.push_instr(Instr::JmpCond {
+                src:      Value::Id(is_neg),
+                on_true:  is_neg_block,
+                on_false: is_neg_block,
+            });
+
+            let cond_block = self.begin_block();
+            let min_val = self.new_tmp();
+            self.push_instr(Instr::AssignLoad {
+                dst: min_val,
+                ty:  Type::I64,
+                src: min,
+            });
+
+            let tmp = self.new_tmp();
+            self.push_instr(Instr::AssignBin {
+                dst: tmp,
+                op:  BinOp::Lt,
+                lhs: Value::Id(dst),
+                rhs: Value::Id(min_val),
+            });
+
+            let min_jmp = Instr::JmpCond {
+                src:      Value::Id(tmp),
+                on_true:  cond_block,
+                on_false: cond_block,
+            };
+            self.push_instr(min_jmp);
+
+            let then_block = self.begin_block();
+            self.push_instr(Instr::Store {
+                dst: min,
+                ty:  Type::I64,
+                src: Value::Id(dst),
+            });
+            self.push_instr(Instr::Store {
+                dst: min_ty,
+                ty:  Type::I64,
+                src: Value::Int(i as i64),
+            });
+            let end_block = self.begin_block();
+
+            self.patch_jmp_cond(is_neg_block, end_block, cond_block);
+            self.set_dom(is_neg_block, cond_block);
+            self.set_dom(is_neg_block, end_block);
+
+            self.patch_jmp_cond(cond_block, then_block, end_block);
+            self.set_dom(cond_block, then_block);
         }
-        todo!()
+
+        let cur_block = self.cur_block();
+        let def_val = self.build_default_value(case_expr_ty);
+
+        let tmp = self.new_tmp();
+        self.push_instr(Instr::AssignLoad {
+            dst: tmp,
+            ty:  Type::I64,
+            src: min_ty,
+        });
+        self.push_instr(Instr::Switch {
+            src:     Value::Id(tmp),
+            default: cur_block,
+            cases:   Vec::new(),
+        });
+
+        let mut arms = Vec::with_capacity(cases.len());
+        for TypedCaseArm { id, ty, expr, .. } in cases {
+            self.begin_scope();
+            let block = self.begin_block();
+            self.set_dom(cur_block, block);
+            self.set_pred(cur_block, block);
+
+            let src = self.build_maybe_cast(ty, Value::Id(src), TypeId::OBJECT);
+
+            let id = self.push_local(id, ty);
+            self.push_instr(Instr::Store {
+                dst: id,
+                ty: ty.into(),
+                src,
+            });
+
+            let (body_val, body_ty) = self.build_expr(expr);
+            let body = self.build_maybe_cast(case_expr_ty, body_val, body_ty);
+
+            let cur_block = self.cur_block();
+            arms.push((body, block, cur_block));
+            self.push_instr(Instr::Jmp(cur_block));
+
+            self.end_scope();
+        }
+
+        self.end_scope();
+        let end_block = self.begin_block();
+        self.set_dom(cur_block, end_block);
+        self.patch_switch(
+            cur_block,
+            end_block,
+            arms.iter().map(|(_, block, _)| *block),
+        );
+        for (_, _, block) in arms.iter() {
+            self.patch_jmp(*block, end_block);
+        }
+        let arms = std::iter::once((def_val, cur_block))
+            .chain(arms.into_iter().map(|(val, _, block)| (val, block)))
+            .collect();
+        let tmp = self.new_tmp();
+        self.push_instr(Instr::AssignPhi(tmp, case_expr_ty.into(), arms));
+
+        (Value::Id(tmp), case_expr_ty)
+    }
+
+    fn build_default_value(&mut self, ty: TypeId) -> Value {
+        match ty {
+            TypeId::INT => Value::Int(0),
+            TypeId::BOOL => Value::Bool(false),
+            TypeId::STRING => {
+                let (_, s) = self.intern_string("");
+                Value::Id(self.build_string(s))
+            }
+            _ => Value::Void,
+        }
     }
 
     fn build_while(&mut self, cond: TypedExpr<'a>, body: TypedExpr<'a>) -> (Value, TypeId) {
@@ -1016,6 +1243,8 @@ impl<'a> IrBuilder<'a> {
 
         let end_block = self.begin_block();
         self.patch_jmp_cond(cond_end_block, body_block, end_block);
+        self.set_dom(cond_end_block, end_block);
+        self.set_dom(cond_end_block, end_block);
         (Value::Void, TypeId::OBJECT)
     }
 
@@ -1053,6 +1282,8 @@ impl<'a> IrBuilder<'a> {
         self.push_instr(kind);
         self.patch_jmp_cond(cond_block, then_block, else_block);
         self.patch_jmp(then_end_block, end_block);
+        self.set_dom(cond_block, then_block);
+        self.set_dom(cond_block, else_block);
         self.set_dom(cond_block, end_block);
 
         (Value::Id(tmp), ty)

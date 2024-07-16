@@ -42,6 +42,9 @@ impl Compiler {
             declare ccc %Object @Object.abort(%Object)\n\
             declare ccc %String @Object.type_name(%Object)\n\
             declare ccc %Object @Object.copy(%Object)\n\
+            declare ccc i1      @Object.To_Bool(%Object)\n\
+            declare ccc i64     @Object.To_Int(%Object)\n\
+            declare ccc %String @Object.To_String(%Object)\n\
             declare ccc i64     @Int.new(ptr)\n\
             declare ccc %String @Int.type_name(i64)\n\
             declare ccc i64     @Int.copy(i64)\n\
@@ -69,6 +72,10 @@ impl Compiler {
             declare ccc %Object @Allocator.copy(%Object)\n\
             declare ccc ptr     @Allocator.alloc(i64)\n\
             declare ccc %Object @Allocator.free(ptr)\n\
+            declare ccc %Object @ClassComparator.new(ptr)\n\
+            declare ccc %Object @ClassComparator.type_name(%Object)\n\
+            declare ccc %Object @ClassComparator.copy(%Object)\n\
+            declare ccc i64     @ClassComparator.compare(%Object, ptr, ptr)\n\
             ",
         );
         let mut ids = FxHashMap::default();
@@ -136,7 +143,7 @@ impl Compiler {
     }
 
     fn compile_value_with_type(&mut self, ty: Type, val: &Value) {
-        self.push_str(&format!("{} {}", ty, val.to_llvm_string()))
+        self.push_str(&format!("{} {}", ty, val.to_llvm_string(&self.globals)))
     }
 
     fn compile_value(&mut self, val: &Value) {
@@ -220,6 +227,7 @@ impl Compiler {
                     }
                 }
                 self.push_str(") {\n");
+                self.push_str("b0:\n");
             }
             Instr::Label(id) => {
                 self.push_str(&format!("{}:\n", id));
@@ -393,6 +401,22 @@ impl Compiler {
                     }
                 }
                 self.push_newline();
+            }
+
+            Instr::Switch {
+                src,
+                default,
+                cases,
+            } => {
+                self.push_str(&format!("    switch i64 {}, label %{} [\n", src, default));
+                for (i, (val, block)) in cases.iter().enumerate() {
+                    self.push_str(&format!("        i32 {}, label %{}", val, block));
+                    if i < cases.len() - 1 {
+                        self.push_newline();
+                    } else {
+                        self.push_str("\n    ]\n");
+                    }
+                }
             }
 
             _ => todo!("{:?}", instr),

@@ -105,6 +105,7 @@ pub enum Type<'a> {
 impl<'a> Type<'a> {
     const IO_CLASS: Type<'static> = Type::Class("IO");
     const ALLOCATOR_CLASS: Type<'static> = Type::Class("Allocator");
+    const COMPARATOR_CLASS: Type<'static> = Type::Class("ClassComparator");
 
     pub fn to_str(&self) -> &'a str {
         match self {
@@ -200,6 +201,7 @@ impl TypeId {
     pub const STRING: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(4) }));
     pub const IO: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(5) }));
     pub const ALLOCATOR: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(6) }));
+    pub const COMPARATOR: TypeId = TypeId::Class(ClassId(unsafe { NonZeroU32::new_unchecked(7) }));
 
     #[inline]
     pub const fn align(size: usize, alignment: usize) -> usize {
@@ -327,6 +329,7 @@ impl std::fmt::Display for TypeId {
             &TypeId::STRING => write!(f, "String"),
             &TypeId::IO => write!(f, "IO"),
             &TypeId::ALLOCATOR => write!(f, "Allocator"),
+            &TypeId::COMPARATOR => write!(f, "ClassComparator"),
             TypeId::Class(id) => write!(f, "Class{}", id.0),
         }
     }
@@ -475,27 +478,37 @@ pub struct ClassEnv<'a> {
     classes: IndexVec<TypeId, ClassTypeData<'a>>,
 }
 
+macro_rules! builtin_vtable {
+    ($id:expr, [ $($method:expr),* ]) => {
+        vec![
+            (TypeId::OBJECT, "Table"),
+            ($id, "new"),
+            (TypeId::OBJECT, "abort"),
+            ($id, "type_name"),
+            ($id, "copy"),
+            (TypeId::OBJECT, "To_Bool"),
+            (TypeId::OBJECT, "To_Int"),
+            (TypeId::OBJECT, "To_String"),
+            $(($id, $method)),*
+        ]
+    };
+}
+
+macro_rules! builtin_method_map {
+    () => {
+        FxHashMap::default()
+    };
+    ($(($id:literal, [ $($param:expr),* ], $return_ty:expr)),+ $(,)?) => {{
+        let mut map = FxHashMap::default();
+        $(map.insert($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty));)*
+        map
+    }};
+}
+
 impl<'a> ClassEnv<'a> {
     /// Create a new ClassEnv with the built-in classes.
     pub fn new() -> Self {
         let mut classes = IndexVec::with_capacity(5);
-
-        macro_rules! builtin_method_map {
-            () => {
-                FxHashMap::default()
-            };
-            ($(($id:literal, [ $($param:expr),* ], $return_ty:expr)),+ $(,)?) => {{
-                let mut map = FxHashMap::default();
-                $(map.insert($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty));)*
-                map
-            }};
-        }
-
-        macro_rules! builtin_vtable {
-            ($id:expr, [ $($method:expr),* ]) => {
-                vec![ (TypeId::OBJECT, "Table"), ($id, "new"), (TypeId::OBJECT, "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
-            };
-        }
 
         let object = ClassTypeData::new(
             "Object",
@@ -505,6 +518,9 @@ impl<'a> ClassEnv<'a> {
                 ("abort", [], TypeId::OBJECT),
                 ("type_name", [], TypeId::STRING),
                 ("copy", [], TypeId::SelfType),
+                ("To_Int", [], TypeId::INT),
+                ("To_Bool", [], TypeId::BOOL),
+                ("To_String", [], TypeId::STRING),
             ],
             builtin_vtable!(TypeId::OBJECT, []),
         )
@@ -513,7 +529,7 @@ impl<'a> ClassEnv<'a> {
             "Bool",
             Some(TypeId::OBJECT),
             FxHashMap::default(),
-            FxHashMap::default(),
+            builtin_method_map![("Cast", [], TypeId::OBJECT)],
             builtin_vtable!(TypeId::BOOL, ["Cast"]),
         )
         .unwrap();
@@ -521,7 +537,7 @@ impl<'a> ClassEnv<'a> {
             "Int",
             Some(TypeId::OBJECT),
             FxHashMap::default(),
-            FxHashMap::default(),
+            builtin_method_map![("Cast", [], TypeId::OBJECT)],
             builtin_vtable!(TypeId::INT, ["Cast"]),
         )
         .unwrap();
@@ -533,6 +549,7 @@ impl<'a> ClassEnv<'a> {
                 ("length", [], TypeId::INT),
                 ("concat", [TypeId::STRING], TypeId::STRING),
                 ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
+                ("Cast", [], TypeId::OBJECT),
             ],
             builtin_vtable!(TypeId::STRING, ["Cast", "length", "concat", "substr"]),
         )
@@ -555,10 +572,18 @@ impl<'a> ClassEnv<'a> {
             Some(TypeId::OBJECT),
             FxHashMap::default(),
             builtin_method_map!(
-                ("alloc", [TypeId::INT], TypeId::OBJECT),
+                ("alloc", [TypeId::INT], TypeId::INT),
                 ("free", [TypeId::OBJECT], TypeId::SelfType),
             ),
             builtin_vtable!(TypeId::ALLOCATOR, ["alloc", "free"]),
+        )
+        .unwrap();
+        let comparator = ClassTypeData::new(
+            "ClassComparator",
+            Some(TypeId::OBJECT),
+            FxHashMap::default(),
+            builtin_method_map!(("compare", [TypeId::INT, TypeId::INT], TypeId::INT),),
+            builtin_vtable!(TypeId::COMPARATOR, ["compare"]),
         )
         .unwrap();
 
@@ -571,6 +596,7 @@ impl<'a> ClassEnv<'a> {
         types.insert(Type::SelfType, TypeId::SelfType);
         types.insert(Type::IO_CLASS, TypeId::IO);
         types.insert(Type::ALLOCATOR_CLASS, TypeId::ALLOCATOR);
+        types.insert(Type::COMPARATOR_CLASS, TypeId::COMPARATOR);
 
         classes.push(object);
         classes.push(int);
@@ -578,6 +604,7 @@ impl<'a> ClassEnv<'a> {
         classes.push(string);
         classes.push(io);
         classes.push(allocator);
+        classes.push(comparator);
 
         debug_assert_eq!(classes.len(), types.len() - 1);
 
@@ -588,23 +615,6 @@ impl<'a> ClassEnv<'a> {
         let mut classes = IndexVec::with_capacity(ienv.classes.len());
         let types = ienv.types;
 
-        macro_rules! builtin_method_map {
-            () => {
-                FxHashMap::default()
-            };
-            ($(($id:literal, [ $($param:expr),* ], $return_ty:expr)),+ $(,)?) => {{
-                let mut map = FxHashMap::default();
-                $(map.insert($id, MethodTypeData::new($id, Box::new([ $($param),* ]), $return_ty));)*
-                map
-            }};
-        }
-
-        macro_rules! builtin_vtable {
-            ($id:expr, [ $($method:expr),* ]) => {
-                vec![ (TypeId::OBJECT, "Table"), ($id, "new"), (TypeId::OBJECT, "abort"), ($id, "type_name"), ($id, "copy"), $(($id, $method)),* ]
-            };
-        }
-
         let object = ClassTypeData::new(
             "Object",
             None,
@@ -613,6 +623,9 @@ impl<'a> ClassEnv<'a> {
                 ("abort", [], TypeId::OBJECT),
                 ("type_name", [], TypeId::STRING),
                 ("copy", [], TypeId::SelfType),
+                ("To_Int", [], TypeId::INT),
+                ("To_Bool", [], TypeId::BOOL),
+                ("To_String", [], TypeId::STRING),
             ],
             builtin_vtable!(TypeId::OBJECT, []),
         )
@@ -621,7 +634,7 @@ impl<'a> ClassEnv<'a> {
             "Bool",
             Some(TypeId::OBJECT),
             FxHashMap::default(),
-            FxHashMap::default(),
+            builtin_method_map![("Cast", [], TypeId::OBJECT)],
             builtin_vtable!(TypeId::BOOL, ["Cast"]),
         )
         .unwrap();
@@ -629,7 +642,7 @@ impl<'a> ClassEnv<'a> {
             "Int",
             Some(TypeId::OBJECT),
             FxHashMap::default(),
-            FxHashMap::default(),
+            builtin_method_map![("Cast", [], TypeId::OBJECT)],
             builtin_vtable!(TypeId::INT, ["Cast"]),
         )
         .unwrap();
@@ -641,6 +654,7 @@ impl<'a> ClassEnv<'a> {
                 ("length", [], TypeId::INT),
                 ("concat", [TypeId::STRING], TypeId::STRING),
                 ("substr", [TypeId::INT, TypeId::INT], TypeId::STRING),
+                ("Cast", [], TypeId::OBJECT),
             ],
             builtin_vtable!(TypeId::STRING, ["Cast", "length", "concat", "substr"]),
         )
@@ -669,6 +683,14 @@ impl<'a> ClassEnv<'a> {
             builtin_vtable!(TypeId::ALLOCATOR, ["alloc", "free"]),
         )
         .unwrap();
+        let comparator = ClassTypeData::new(
+            "ClassComparator",
+            Some(TypeId::OBJECT),
+            FxHashMap::default(),
+            builtin_method_map!(("compare", [TypeId::INT, TypeId::INT], TypeId::INT)),
+            builtin_vtable!(TypeId::COMPARATOR, ["compare"]),
+        )
+        .unwrap();
 
         classes.push(object);
         classes.push(int);
@@ -676,6 +698,7 @@ impl<'a> ClassEnv<'a> {
         classes.push(string);
         classes.push(io);
         classes.push(allocator);
+        classes.push(comparator);
 
         Self { types, classes }
     }
@@ -959,9 +982,11 @@ impl<'a> IClassEnv<'a> {
             IClassTypeData::new("String", Ok(Some(TypeId::OBJECT)), 1),
             IClassTypeData::new("IO", Ok(Some(TypeId::OBJECT)), 1),
             IClassTypeData::new("Allocator", Ok(Some(TypeId::OBJECT)), 1),
+            IClassTypeData::new("ClassComparator", Ok(Some(TypeId::OBJECT)), 1),
         ];
         let children = index_vec![
             vec![TypeId::INT, TypeId::BOOL, TypeId::STRING, TypeId::IO],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -977,6 +1002,7 @@ impl<'a> IClassEnv<'a> {
         types.insert(Type::SelfType, TypeId::SelfType);
         types.insert(Type::IO_CLASS, TypeId::IO);
         types.insert(Type::ALLOCATOR_CLASS, TypeId::ALLOCATOR);
+        types.insert(Type::COMPARATOR_CLASS, TypeId::COMPARATOR);
 
         debug_assert_eq!(classes.len(), children.len());
         debug_assert_eq!(types.len() - 1, classes.len());

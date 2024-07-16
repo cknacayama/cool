@@ -177,7 +177,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_list(&mut self) -> ParseResult<(Box<[Expr<'a>]>, Span)> {
         let mut span = self.expect(TokenKind::LParen)?;
 
-        let mut exprs = vec![];
+        let mut exprs = Vec::new();
 
         if !self.peek_if(TokenKind::RParen) {
             exprs.push(self.parse_expr()?);
@@ -192,7 +192,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr_block(&mut self, span: Span) -> ParseResult<(Box<[Expr<'a>]>, Span)> {
-        let mut exprs = vec![];
+        let mut exprs = Vec::new();
 
         while !self.peek_if(TokenKind::RBrace) {
             exprs.push(self.parse_expr()?);
@@ -297,7 +297,7 @@ impl<'a> Parser<'a> {
                 Ok(Feature::new(kind, span))
             }
             TokenKind::LParen => {
-                let mut formals = vec![];
+                let mut formals = Vec::new();
                 if !self.peek_if(TokenKind::RParen) {
                     formals.push(self.parse_formal()?);
                     while self.next_if(TokenKind::Comma).is_some() {
@@ -533,7 +533,7 @@ impl<'a> Parser<'a> {
     fn parse_case(&mut self, span: Span) -> ParseResult<Expr<'a>> {
         let expr = self.parse_expr()?;
         self.expect(TokenKind::KwOf)?;
-        let mut arms = vec![];
+        let mut arms = Vec::new();
         while !self.peek_if(TokenKind::KwEsac) {
             let (id, span) = self.parse_id()?;
             self.expect(TokenKind::Colon)?;

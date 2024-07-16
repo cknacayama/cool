@@ -48,12 +48,12 @@ pub struct IndexVec<I: Idx, V> {
     _marker: PhantomData<I>,
 }
 
-impl<K: Idx, V> Debug for IndexVec<K, V>
+impl<K: Idx + Debug, V> Debug for IndexVec<K, V>
 where
     V: Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.raw.iter()).finish()
+        f.debug_map().entries(self.iter()).finish()
     }
 }
 
