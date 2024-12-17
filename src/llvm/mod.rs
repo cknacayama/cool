@@ -10,7 +10,7 @@ use crate::{
 impl Value {
     pub fn to_llvm_string(&self, globals: &IndexVec<GlobalId, Rc<str>>) -> String {
         match self {
-            Value::Id(id) => format!("{}", id.to_ir_string(globals)),
+            Value::Id(id) => id.to_ir_string(globals).to_string(),
             Value::Int(val) => format!("{}", val),
             Value::Bool(val) => format!("{}", val),
             Value::Void => "{ ptr null, ptr null }".to_string(),

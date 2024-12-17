@@ -15,7 +15,7 @@ pub fn llvm_string(string: &str) -> String {
             '\t' => result.push_str(r"\09"),
             '\u{0008}' => result.push_str(r"\08"),
             '\u{000C}' => result.push_str(r"\0C"),
-            _ => result.push(c as char),
+            _ => result.push(c),
         }
     }
     result
@@ -176,7 +176,7 @@ impl Compiler {
                 self.push_str(&format!("{}", b));
             }
             Value::Id(id) => {
-                self.push_str(&format!("{}", id.to_ir_string(&self.globals)));
+                self.push_str(&id.to_ir_string(&self.globals).to_string());
             }
             Value::Void => {
                 self.push_str("{ ptr null, ptr null }");

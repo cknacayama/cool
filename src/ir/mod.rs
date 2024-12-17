@@ -162,10 +162,7 @@ impl Instr {
                 Some(IrId::Global(*dst)),
                 Some(
                     ids.iter()
-                        .filter_map(|id| match id {
-                            Some(id) => Some(IrId::Global(*id)),
-                            None => None,
-                        })
+                        .filter_map(|id| id.as_ref().map(|id| IrId::Global(*id)))
                         .collect(),
                 ),
             ),
@@ -583,7 +580,7 @@ impl Instr {
                         s.push_str(", ");
                     }
                 }
-                s.push_str(") {{");
+                s.push_str(") {");
                 s
             }
             Instr::Return(val) => format!("    ret {}\n}}", val.to_ir_string(globals)),

@@ -10,7 +10,7 @@ fn main() {
     });
 
     if let Err(e) = config.run() {
-        config.report_error(e);
+        config.report_error(e)
     }
     eprintln!("Elapsed time: {:?}", now.elapsed());
 }

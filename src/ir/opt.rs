@@ -288,7 +288,7 @@ impl FunctionOptmizer {
 
         let mut uses = self.mem2reg(&preds, phis);
 
-        while self.const_propagation(&mut uses) | self.dead_code_elimination(&mut uses) {}
+        while self.propagation(&mut uses) | self.dead_code_elimination(&mut uses) {}
 
         self.try_merge_blocks();
 
@@ -574,51 +574,44 @@ impl FunctionOptmizer {
         stores
     }
 
-    fn all_locals_uses(&self) -> IndexVec<LocalId, (BlockId, Vec<BlockId>)> {
-        let mut uses = index_vec![(BlockId::ENTRY, Vec::new()); self.locals.len()];
+    fn gen_set(&self) -> IndexVec<BlockId, Vec<LocalId>> {
+        let mut gen = index_vec![Vec::new(); self.blocks_count()];
 
-        for block_id in self.block_ids() {
-            for instr in self.instrs_block(block_id) {
-                let (decl, used) = instr.uses();
-                if let Some(decl) = decl.and_then(|id| id.local_id()) {
-                    uses[decl].0 = block_id;
-                }
-                if let Some(used) = used {
-                    for u in used.into_vec().into_iter().filter_map(|id| id.local_id()) {
-                        uses[u].1.push(block_id);
-                    }
+        for bb in self.block_ids() {
+            for instr in self.instrs_block(bb) {
+                if let Instr::Local(_, IrId::Local(local)) = instr {
+                    gen[bb].push(*local);
                 }
             }
         }
 
-        uses
+        gen
     }
 
-    fn local_liveness_check(
+    fn local_liveness(
         &self,
         preds: &Predecessors,
     ) -> (
-        IndexVec<BlockId, Vec<LocalId>>,
-        IndexVec<BlockId, Vec<LocalId>>,
+        IndexVec<BlockId, FxHashSet<LocalId>>,
+        IndexVec<BlockId, FxHashSet<LocalId>>,
     ) {
-        let uses = self.all_locals_uses();
-        let mut live_out = index_vec![Vec::new(); self.blocks_count()];
-        let mut live_in = index_vec![Vec::new(); self.blocks_count()];
-        let mut visited = index_vec![index_vec![false; self.locals.len()]; self.blocks_count()];
+        let gen = self.gen_set();
 
-        for (local, (decl_block, mut blocks)) in uses.into_iter() {
-            while let Some(block) = blocks.pop() {
-                if visited[block][local] {
-                    continue;
-                }
-                live_in[block].push(local);
-                visited[block][local] = true;
-                for pred in preds[block].iter().copied() {
-                    live_out[pred].push(local);
-                    if pred != decl_block {
-                        blocks.push(pred);
-                    }
-                }
+        let mut live_out = index_vec![FxHashSet::default(); self.blocks_count()];
+        let mut live_in = index_vec![FxHashSet::default(); self.blocks_count()];
+        let mut worklist = VecDeque::from([BlockId::ENTRY]);
+
+        while let Some(bb) = worklist.pop_front() {
+            for p in preds[bb].iter().copied() {
+                live_in[bb].extend(&live_out[p]);
+            }
+            let len = live_out[bb].len();
+            if len < gen[bb].len() {
+                live_out[bb].extend(&gen[bb]);
+            }
+            live_out[bb].extend(&live_in[bb]);
+            if live_out[bb].len() > len {
+                self.successors_visit(bb, |succ| worklist.push_back(succ));
             }
         }
 
@@ -631,7 +624,7 @@ impl FunctionOptmizer {
         dom_frontiers: &DominanceFrontiers,
     ) -> PhiPositions {
         let mut phi_positions: PhiPositions = index_vec![Vec::new(); self.blocks_count()];
-        let (live_in, _) = self.local_liveness_check(preds);
+        let (live_in, _) = self.local_liveness(preds);
         let stores = self.all_stores();
 
         for (local, mut stores) in stores.into_iter().map(|(l, (_, s))| (l, s)) {
@@ -799,14 +792,16 @@ impl FunctionOptmizer {
             let VarUses { decl, .. } = uses.remove(&id).unwrap();
             self.instrs_mut()[decl].replace_with_nop();
             for uses in uses.values_mut() {
-                uses.uses.remove(&decl);
+                if uses.uses.remove(&decl) {
+                    println!("mengo");
+                }
             }
         }
 
         res
     }
 
-    fn const_propagation(&mut self, uses: &mut FxHashMap<IrId, VarUses>) -> bool {
+    fn propagation(&mut self, uses: &mut FxHashMap<IrId, VarUses>) -> bool {
         let mut values = FxHashMap::default();
         let mut work_list = (0..self.instrs().len())
             .map(InstrId)
@@ -815,7 +810,7 @@ impl FunctionOptmizer {
 
         while let Some(id) = work_list.pop_front() {
             let instr = &mut self.instrs_mut()[id];
-            if let Some(uses) = instr.const_fold(&mut values, uses) {
+            if let Some(uses) = instr.fold(&mut values, uses) {
                 changed = true;
                 work_list.extend(uses.uses);
             }
@@ -920,7 +915,7 @@ impl Instr {
                     let new_id = tmp.next();
                     let old_id = *dst;
                     renames.entry(old_id).or_default().push(new_id);
-                    let src = std::mem::take(src);
+                    let src = *src;
                     *self = Self::Assign {
                         dst: new_id,
                         ty: *ty,
@@ -1084,14 +1079,14 @@ impl Instr {
     }
 
     #[inline]
-    fn const_fold(
+    fn fold(
         &mut self,
         values: &mut FxHashMap<IrId, Value>,
         uses: &mut FxHashMap<IrId, VarUses>,
     ) -> Option<VarUses> {
         match self {
             Instr::Assign { dst, src, .. } => {
-                let mut val = std::mem::take(src);
+                let mut val = *src;
                 Self::try_replace(values, &mut val);
                 let folded = uses.remove(dst).unwrap();
                 if let Value::Id(ref id) = val {
@@ -1107,7 +1102,8 @@ impl Instr {
                 let op = *op;
                 let dst = *dst;
                 Self::try_replace(values, src);
-                if Self::const_fold_un(values, op, dst, *ty, src) {
+                if let Some(val) = Self::const_fold_un(op, *ty, src) {
+                    values.insert(dst, val);
                     let folded = uses.remove(&dst).unwrap();
                     self.replace_with_nop();
                     Some(folded)
@@ -1120,7 +1116,8 @@ impl Instr {
                 let dst = *dst;
                 Self::try_replace(values, lhs);
                 Self::try_replace(values, rhs);
-                if Self::const_fold_bin(values, op, dst, lhs, rhs) {
+                if let Some(val) = Self::const_fold_bin(op, lhs, rhs) {
+                    values.insert(dst, val);
                     let folded = uses.remove(&dst).unwrap();
                     self.replace_with_nop();
                     Some(folded)
@@ -1135,16 +1132,23 @@ impl Instr {
                 on_false,
             } => {
                 Self::try_replace(values, src);
-                let src = *src;
                 let on_true = *on_true;
                 let on_false = *on_false;
-                self.const_fold_jmp_cond(src, on_true, on_false);
+                if let Some(block) = Self::const_fold_jmp_cond(src, on_true, on_false) {
+                    *self = Instr::Jmp(block);
+                }
                 None
             }
 
-            Instr::Switch { src, .. } => {
+            Instr::Switch {
+                src,
+                default,
+                cases,
+            } => {
                 Self::try_replace(values, src);
-                self.const_fold_switch();
+                if let Some(block) = Self::const_fold_switch(src, *default, cases) {
+                    *self = Instr::Jmp(block);
+                }
                 None
             }
 
@@ -1210,120 +1214,66 @@ impl Instr {
     }
 
     #[inline]
-    fn const_fold_jmp_cond(&mut self, src: Value, on_true: BlockId, on_false: BlockId) {
-        if let Value::Bool(val) = src {
-            if val {
-                *self = Instr::Jmp(on_true)
-            } else {
-                *self = Instr::Jmp(on_false)
-            }
+    fn const_fold_jmp_cond(src: &Value, on_true: BlockId, on_false: BlockId) -> Option<BlockId> {
+        match src {
+            Value::Bool(val) => Some(if *val { on_true } else { on_false }),
+            _ => None,
         }
     }
 
     #[inline]
-    fn const_fold_switch(&mut self) {
-        let Instr::Switch {
-            src,
-            default,
-            cases,
-        } = self
-        else {
-            unreachable!()
-        };
-        if let Value::Int(val) = src {
-            match cases.iter().find(|(i, _)| i == val) {
-                Some((_, block)) => *self = Instr::Jmp(*block),
-                None => *self = Instr::Jmp(*default),
-            }
+    fn const_fold_switch(
+        src: &Value,
+        default: BlockId,
+        cases: &[(i64, BlockId)],
+    ) -> Option<BlockId> {
+        match src {
+            Value::Int(val) => match cases.iter().find(|(i, _)| i == val) {
+                Some((_, block)) => Some(*block),
+                None => Some(default),
+            },
+            _ => None,
         }
     }
 
     #[inline]
-    fn const_fold_un(
-        values: &mut FxHashMap<IrId, Value>,
-        op: UnOp,
-        id: IrId,
-        ty: Type,
-        arg: &Value,
-    ) -> bool {
+    fn const_fold_un(op: UnOp, ty: Type, arg: &Value) -> Option<Value> {
         match op {
             UnOp::IsVoid => {
                 if matches!(ty, Type::String | Type::I1 | Type::I64) {
-                    values.insert(id, Value::Bool(false));
-                    return true;
+                    return Some(Value::Bool(false));
                 }
-
                 match arg {
-                    Value::Void => {
-                        values.insert(id, Value::Bool(true));
-                        true
-                    }
-                    _ => false,
+                    Value::Void => Some(Value::Bool(true)),
+                    _ => None,
                 }
             }
 
             UnOp::Complement => match arg {
-                Value::Int(arg) => {
-                    let val = -arg;
-                    values.insert(id, Value::Int(val));
-                    true
-                }
-                _ => false,
+                Value::Int(arg) => Some(Value::Int(-arg)),
+                _ => None,
             },
 
             UnOp::Not => match arg {
-                Value::Bool(arg) => {
-                    let val = !arg;
-                    values.insert(id, Value::Bool(val));
-                    true
-                }
-                _ => false,
+                Value::Bool(arg) => Some(Value::Bool(!arg)),
+                _ => None,
             },
         }
     }
 
-    fn const_fold_bin(
-        values: &mut FxHashMap<IrId, Value>,
-        op: BinOp,
-        dst: IrId,
-        lhs: &Value,
-        rhs: &Value,
-    ) -> bool {
+    #[inline]
+    fn const_fold_bin(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Value> {
         match (lhs, rhs) {
-            (Value::Int(lhs), Value::Int(rhs)) => {
-                match op {
-                    BinOp::Add => {
-                        let val = lhs + rhs;
-                        values.insert(dst, Value::Int(val));
-                    }
-                    BinOp::Sub => {
-                        let val = lhs - rhs;
-                        values.insert(dst, Value::Int(val));
-                    }
-                    BinOp::Mul => {
-                        let val = lhs * rhs;
-                        values.insert(dst, Value::Int(val));
-                    }
-                    BinOp::Div => {
-                        let val = lhs / rhs;
-                        values.insert(dst, Value::Int(val));
-                    }
-                    BinOp::Lt => {
-                        let val = lhs < rhs;
-                        values.insert(dst, Value::Bool(val));
-                    }
-                    BinOp::Le => {
-                        let val = lhs <= rhs;
-                        values.insert(dst, Value::Bool(val));
-                    }
-                    BinOp::Eq => {
-                        let val = lhs == rhs;
-                        values.insert(dst, Value::Bool(val));
-                    }
-                }
-                true
-            }
-            _ => false,
+            (Value::Int(lhs), Value::Int(rhs)) => Some(match op {
+                BinOp::Add => Value::Int(lhs + rhs),
+                BinOp::Sub => Value::Int(lhs - rhs),
+                BinOp::Mul => Value::Int(lhs * rhs),
+                BinOp::Div => Value::Int(lhs / rhs),
+                BinOp::Lt => Value::Bool(lhs < rhs),
+                BinOp::Le => Value::Bool(lhs <= rhs),
+                BinOp::Eq => Value::Bool(lhs == rhs),
+            }),
+            _ => None,
         }
     }
 }
